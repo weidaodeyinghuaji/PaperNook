@@ -1,0 +1,70 @@
+name: Pull request build
+
+on:
+  push:
+    branches-ignore:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build PaperTodo
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[ci]') ||
+      contains(github.event.head_commit.message, '[debug-ci]')
+    concurrency:
+      group: pull-request-build-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "true"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore .\PaperTodo.csproj
+
+      - name: Build
+        run: dotnet build .\PaperTodo.csproj -c Release --no-restore
+
+      - name: Markdown semantic checks
+        run: dotnet run --project .\tests\PaperTodo.MarkdownSemanticChecks\PaperTodo.MarkdownSemanticChecks.csproj -c Release
+
+      - name: Markdown editing checks
+        run: dotnet run --project .\tests\PaperTodo.MarkdownEditingChecks\PaperTodo.MarkdownEditingChecks.csproj -c Release
+
+      - name: Todo navigation checks
+        run: dotnet run --project .\tests\PaperTodo.TodoNavigationChecks\PaperTodo.TodoNavigationChecks.csproj -c Release
+
+      - name: Edge title checks
+        run: dotnet run --project .\tests\PaperTodo.EdgeTitleChecks\PaperTodo.EdgeTitleChecks.csproj -c Release
+
+      - name: Edge preview rendering and lifecycle checks
+        run: dotnet run --project .\tests\PaperTodo.EdgePreviewChecks\PaperTodo.EdgePreviewChecks.csproj -c Release
+
+      - name: Threading regression checks
+        run: dotnet run --project .\tests\PaperTodo.ThreadingChecks\PaperTodo.ThreadingChecks.csproj -c Release
+
+      - name: Startup, shutdown and small-workset checks
+        run: dotnet run --project .\tests\PaperTodo.LifecycleChecks\PaperTodo.LifecycleChecks.csproj -c Release

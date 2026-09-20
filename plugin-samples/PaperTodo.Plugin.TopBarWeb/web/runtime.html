@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>PaperTodo Top Bar Runtime</title>
+</head>
+<body>
+<script>
+  const paperIds = new Set();
+
+  async function registerGlobalTopBar() {
+    await papertodo.globalTopBar.setActions([
+      {
+        id: 'inspect-current',
+        icon: {
+          kind: 'svgPath',
+          value: 'M3,3 L13,3 13,13 3,13 Z M6,8 L10,8',
+          renderMode: 'stroke',
+          strokeWidth: 1.5
+        },
+        toolTip: '读取当前纸片信息'
+      }
+    ]);
+  }
+
+  function publishPaper(paperId) {
+    if (!paperId) return;
+    void papertodo.papers.setHeaderText(paperId, 'Top Bar 2.1');
+    void papertodo.papers.setCapsulePresentation(paperId, {
+      preferredWidth: 0,
+      plainText: 'Top Bar 2.1',
+      toolTip: 'Protocol 2.1 Top Bar 示例',
+      components: [
+        { kind: 'glyph', text: 'T' },
+        { kind: 'text', text: 'Top Bar 2.1', fill: true }
+      ]
+    });
+  }
+
+  function replacePapers(values) {
+    paperIds.clear();
+    for (const value of Array.isArray(values) ? values : []) {
+      const paperId = String(value?.paperId || '').trim();
+      if (!paperId) continue;
+      paperIds.add(paperId);
+      publishPaper(paperId);
+    }
+  }
+
+  papertodo.onEvent(async message => {
+    if (message.type === 'shortcutInvoked' &&
+        message.actionId === 'runtime.ping') {
+      console.log('PaperTodo custom shortcut', message.settingId, message.actionId);
+      return;
+    }
+
+    if (message.type === 'paperEvent') {
+      const item = message.event || {};
+      const paperId = String(item.paperId || '').trim();
+      if (item.kind === 'paperAdded' && paperId) {
+        paperIds.add(paperId);
+        publishPaper(paperId);
+      } else if (item.kind === 'paperRemoved' && paperId) {
+        paperIds.delete(paperId);
+      }
+      return;
+    }
+
+    if (message.type !== 'topBarActionInvoked' ||
+        message.action?.actionId !== 'inspect-current') {
+      return;
+    }
+
+    try {
+      const paper = await papertodo.workspace.request('papers.get', {
+        paperId: message.action.targetPaperId
+      });
+      console.log('PaperTodo Global Top Bar target', paper || message.action);
+    } catch (error) {
+      console.error('PaperTodo Global Top Bar workspace read failed', error);
+    }
+  });
+
+  window.addEventListener('papertodo', event => {
+    const message = event.detail || {};
+    if (message.type !== 'initialize') return;
+    replacePapers(message.papers);
+    registerGlobalTopBar().catch(error => {
+      console.error('PaperTodo Global Top Bar registration failed', error);
+    });
+  });
+</script>
+</body>
+</html>

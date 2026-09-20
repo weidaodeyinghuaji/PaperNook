@@ -1,0 +1,1388 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="AppStartupFailureMessage" xml:space="preserve">
+    <value>起動に失敗しました: データファイルを読み込めません。ファイルが使用中、または破損している可能性があります。&#x0A;既存データの上書きを避けるため、アプリは起動を停止しました。&#x0A;&#x0A;エラー: {0}</value>
+  </data>
+  <data name="ResourceTextVersion" xml:space="preserve">
+    <value>3.1</value>
+  </data>
+  <data name="AppStartupFailureTitle" xml:space="preserve">
+    <value>PaperNook - 起動失敗</value>
+  </data>
+  <data name="AppUnhandledExceptionMessage" xml:space="preserve">
+    <value>未処理のエラーが発生しました。クラッシュログを PaperNook.crash.log に書き込みました。&#x0A;&#x0A;アプリを再起動してください。直近の変更は自動保存と data.backup.json に依存します。&#x0A;&#x0A;エラー: {0}</value>
+  </data>
+  <data name="AppUnhandledExceptionTitle" xml:space="preserve">
+    <value>PaperNook - 異常終了</value>
+  </data>
+  <data name="AppDesktopRuntimeLoadFailureTitle" xml:space="preserve">
+    <value>PaperNook - .NET 実行環境コンポーネントの読み込み失敗</value>
+  </data>
+  <data name="AppDesktopRuntimeLoadFailureMessage" xml:space="preserve">
+    <value>.NET 実行環境コンポーネントを読み込めなかったため、アプリを完全に終了します。クラッシュログを PaperNook.crash.log に書き込みました。
+
+PaperNook を手動でもう一度開いてください。問題が繰り返される場合は、PC を再起動するか、.NET Desktop Runtime を修復 / 再インストールしてください。
+
+エラー: {0}</value>
+  </data>
+  <data name="AppendAreaToolTip" xml:space="preserve">
+    <value>クリックして内容を追加、ドラッグして削除</value>
+  </data>
+  <data name="CapsuleNote" xml:space="preserve">
+    <value>メモ</value>
+  </data>
+  <data name="CapsuleTodo" xml:space="preserve">
+    <value>ToDo</value>
+  </data>
+  <data name="CapsuleTodoCount" xml:space="preserve">
+    <value>{0}件</value>
+  </data>
+  <data name="CommonCancel" xml:space="preserve">
+    <value>キャンセル</value>
+  </data>
+  <data name="CommonOk" xml:space="preserve">
+    <value>OK</value>
+  </data>
+  <data name="DeletePaperBody" xml:space="preserve">
+    <value>削除すると完全に取り除かれ、トレイからは復元できません。</value>
+  </data>
+  <data name="DeletePaperQuestion" xml:space="preserve">
+    <value>この紙片を削除しますか？</value>
+  </data>
+  <data name="DeletePaperTitle" xml:space="preserve">
+    <value>紙片を削除</value>
+  </data>
+  <data name="DragSortToolTip" xml:space="preserve">
+    <value>ドラッグして並べ替え</value>
+  </data>
+  <data name="EmptyNotePaper" xml:space="preserve">
+    <value>空のメモ紙</value>
+  </data>
+  <data name="EmptyTodoPaper" xml:space="preserve">
+    <value>空のToDo紙</value>
+  </data>
+  <data name="MarkdownDefaultLinkLabel" xml:space="preserve">
+    <value>リンク</value>
+  </data>
+  <data name="ToolTipDragPaperToTodo" xml:space="preserve">
+    <value>ToDo項目の上へドラッグして紙片を関連付け</value>
+  </data>
+  <data name="ToolTipDragPaperToAssociation" xml:space="preserve">
+    <value>ToDo項目または別のウィンドウへドラッグして紙片を関連付け</value>
+  </data>
+  <data name="AssociationDropTodo" xml:space="preserve">
+    <value>離してこのToDoに関連付け</value>
+  </data>
+  <data name="ToolTipOpenLinkedPaper" xml:space="preserve">
+    <value>関連紙片を開く: {0}</value>
+  </data>
+  <data name="ToolTipRunLinkedScriptCapsule" xml:space="preserve">
+    <value>関連スクリプトを実行: {0}</value>
+  </data>
+  <data name="MarkdownRenderBasic" xml:space="preserve">
+    <value>基本</value>
+  </data>
+  <data name="MarkdownRenderFull" xml:space="preserve">
+    <value>完全レンダリング</value>
+  </data>
+  <data name="MarkdownRenderOff" xml:space="preserve">
+    <value>オフ</value>
+  </data>
+  <data name="FullscreenTopmostModeAvoid" xml:space="preserve">
+    <value>避ける</value>
+  </data>
+  <data name="FullscreenTopmostModeStayOnTop" xml:space="preserve">
+    <value>最前面のまま</value>
+  </data>
+  <data name="MarkdownPreviewFailure" xml:space="preserve">
+    <value>*プレビューに失敗しました。原文は保持されました。エラー: {0}*</value>
+  </data>
+  <data name="OpenMarkdownFailureMessage" xml:space="preserve">
+    <value>既定の {0} エディターを起動できませんでした:&#x0A;{1}</value>
+  </data>
+  <data name="OpenMarkdownFailureTitle" xml:space="preserve">
+    <value>外部で開けません</value>
+  </data>
+  <data name="ScriptCapsuleEmptyMessage" xml:space="preserve">
+    <value>このスクリプトカプセルには実行できる内容がありません。</value>
+  </data>
+  <data name="ScriptCapsuleEditMenu" xml:space="preserve">
+    <value>スクリプトカプセルを編集</value>
+  </data>
+  <data name="ScriptCapsuleExitFailureMessage" xml:space="preserve">
+    <value>スクリプトが終了コード {0} で失敗しました。&#x0A;{1}</value>
+  </data>
+  <data name="ScriptCapsuleFailureTitle" xml:space="preserve">
+    <value>スクリプト実行に失敗</value>
+  </data>
+  <data name="ScriptCapsuleNoOutput" xml:space="preserve">
+    <value>出力はありません。</value>
+  </data>
+  <data name="ScriptCapsuleStartFailureMessage" xml:space="preserve">
+    <value>PowerShell を起動できません。</value>
+  </data>
+  <data name="ScriptCapsulePowerShell7NotFound" xml:space="preserve">
+    <value>PowerShell 7（pwsh.exe）が見つかりません。</value>
+  </data>
+  <data name="MenuBold" xml:space="preserve">
+    <value>太字</value>
+  </data>
+  <data name="MenuClearDone" xml:space="preserve">
+    <value>完了済みを消去</value>
+  </data>
+  <data name="MenuCodeBlock" xml:space="preserve">
+    <value>コードブロック</value>
+  </data>
+  <data name="MenuCollapseToCapsule" xml:space="preserve">
+    <value>カプセルに折りたたむ</value>
+  </data>
+  <data name="MenuDelete" xml:space="preserve">
+    <value>削除</value>
+  </data>
+  <data name="MenuDeleteItem" xml:space="preserve">
+    <value>この項目を削除</value>
+  </data>
+  <data name="MenuFormat" xml:space="preserve">
+    <value>書式</value>
+  </data>
+  <data name="MenuHeading" xml:space="preserve">
+    <value>見出し</value>
+  </data>
+  <data name="MenuHide" xml:space="preserve">
+    <value>隠す</value>
+  </data>
+  <data name="MenuInsertLink" xml:space="preserve">
+    <value>リンクを挿入</value>
+  </data>
+  <data name="MenuInsertImage" xml:space="preserve">
+    <value>画像を挿入</value>
+  </data>
+  <data name="MenuCopyImage" xml:space="preserve">
+    <value>画像をコピー</value>
+  </data>
+  <data name="MenuDeleteImage" xml:space="preserve">
+    <value>画像参照を削除</value>
+  </data>
+  <data name="ImageMissing" xml:space="preserve">
+    <value>画像を表示できません</value>
+  </data>
+  <data name="ImageCorrupted" xml:space="preserve">
+    <value>画像が破損しています</value>
+  </data>
+  <data name="ImageFileDialogFilter" xml:space="preserve">
+    <value>画像ファイル|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff;*.webp|すべてのファイル|*.*</value>
+  </data>
+  <data name="ImageImportFailureTitle" xml:space="preserve">
+    <value>画像の挿入に失敗</value>
+  </data>
+  <data name="ImageImportFailureMessage" xml:space="preserve">
+    <value>画像を挿入できませんでした:&#x0A;{0}</value>
+  </data>
+  <data name="NotePasteRejectedTitle" xml:space="preserve">
+    <value>貼り付けできません</value>
+  </data>
+  <data name="NotePasteRejectedMessage" xml:space="preserve">
+    <value>貼り付け内容が 30,000 文字、1 行 6,000 文字、またはメモ全体の 100,000 文字の上限を超えるため、何も挿入されませんでした。</value>
+  </data>
+  <data name="ImageStoreUnavailable" xml:space="preserve">
+    <value>画像データファイルを読み込めませんでした。既存画像の上書きを避けるため、画像データの書き込みを停止しています。</value>
+  </data>
+  <data name="ImageImportInvalidNote" xml:space="preserve">
+    <value>画像を関連付けるメモを特定できません。</value>
+  </data>
+  <data name="ImageImportFileMissing" xml:space="preserve">
+    <value>画像ファイルが存在しません。</value>
+  </data>
+  <data name="ImageImportUnsupported" xml:space="preserve">
+    <value>挿入できる画像が見つからないか、画像形式が対応していません。</value>
+  </data>
+  <data name="ImageImportUnsupportedFiles" xml:space="preserve">
+    <value>次の画像ファイルはサポートされていません：{0}。</value>
+  </data>
+  <data name="ImageImportUnknownFile" xml:space="preserve">
+    <value>名前のないファイル</value>
+  </data>
+  <data name="ImageImportAdditionalFiles" xml:space="preserve">
+    <value>、ほか {0} 件</value>
+  </data>
+  <data name="ImageImportDimensionsTooLarge" xml:space="preserve">
+    <value>画像サイズが上限を超えています。幅と高さはいずれも {0} ピクセル以下である必要があります。</value>
+  </data>
+  <data name="ImageImportTooLargeCompressionDisabled" xml:space="preserve">
+    <value>画像が {0} MB を超えています。自動圧縮が無効なため、有効にしてから再試行してください。</value>
+  </data>
+  <data name="ImageImportCompressionUnsafe" xml:space="preserve">
+    <value>画像の内容を保ったまま安全に圧縮できないため、インポートを中止しました。</value>
+  </data>
+  <data name="ImageImportCompressionFailed" xml:space="preserve">
+    <value>画像の圧縮に失敗したため、インポートを中止しました。</value>
+  </data>
+  <data name="ImageImportCompressionNotSmaller" xml:space="preserve">
+    <value>圧縮後のファイルが小さくならなかったため、インポートを中止しました。</value>
+  </data>
+  <data name="ImageImportCompressedTooLarge" xml:space="preserve">
+    <value>圧縮後も画像が {0} MB を超えているため、インポートを中止しました。</value>
+  </data>
+  <data name="ImageImportTooLarge" xml:space="preserve">
+    <value>画像 1 枚の上限は {0} MB です。</value>
+  </data>
+  <data name="ImageImportSourceTooLarge" xml:space="preserve">
+    <value>元の画像ファイルが大きすぎます。読み込み前の上限は {0} MB です。</value>
+  </data>
+  <data name="ExternalMarkdownImageExportFailed" xml:space="preserve">
+    <value>ノート内の画像をエクスポートできなかったため、外部エディターを開く操作を中止しました。</value>
+  </data>
+  <data name="ImageImportTotalTooLarge" xml:space="preserve">
+    <value>画像保存容量の上限（{0} MB）に達しました。</value>
+  </data>
+  <data name="MenuOpenLinkedPaper" xml:space="preserve">
+    <value>関連紙片を開く: {0}</value>
+  </data>
+  <data name="MenuEditLinkedScriptCapsule" xml:space="preserve">
+    <value>関連スクリプトを編集: {0}</value>
+  </data>
+  <data name="MenuUnlinkPaper" xml:space="preserve">
+    <value>紙片の関連付けを解除</value>
+  </data>
+  <data name="MenuItalic" xml:space="preserve">
+    <value>斜体</value>
+  </data>
+  <data name="MenuList" xml:space="preserve">
+    <value>リスト</value>
+  </data>
+  <data name="MenuNew" xml:space="preserve">
+    <value>新規</value>
+  </data>
+  <data name="MenuQuick" xml:space="preserve">
+    <value>クイック</value>
+  </data>
+  <data name="MenuNewNotePaper" xml:space="preserve">
+    <value>＋ メモ紙</value>
+  </data>
+  <data name="MenuNewTodoPaper" xml:space="preserve">
+    <value>＋ ToDo紙</value>
+  </data>
+  <data name="MenuQuote" xml:space="preserve">
+    <value>引用</value>
+  </data>
+  <data name="MenuRenameTitle" xml:space="preserve">
+    <value>タイトルを変更</value>
+  </data>
+  <data name="MenuRestoreWindow" xml:space="preserve">
+    <value>紙片として展開</value>
+  </data>
+  <data name="MenuStrikethrough" xml:space="preserve">
+    <value>取り消し線</value>
+  </data>
+  <data name="MenuCopy" xml:space="preserve">
+    <value>コピー</value>
+  </data>
+  <data name="MenuPaste" xml:space="preserve">
+    <value>貼り付け</value>
+  </data>
+  <data name="MenuSelectAll" xml:space="preserve">
+    <value>すべて選択</value>
+  </data>
+  <data name="MenuText" xml:space="preserve">
+    <value>テキスト</value>
+  </data>
+  <data name="MenuThisPaper" xml:space="preserve">
+    <value>この紙片</value>
+  </data>
+  <data name="MenuTodo" xml:space="preserve">
+    <value>ToDo</value>
+  </data>
+  <data name="MenuTodoItem" xml:space="preserve">
+    <value>項目</value>
+  </data>
+  <data name="PaperKindNote" xml:space="preserve">
+    <value>メモ</value>
+  </data>
+  <data name="PaperKindTodo" xml:space="preserve">
+    <value>ToDo</value>
+  </data>
+  <data name="PaperLabelFormat" xml:space="preserve">
+    <value>{0} {1} · {2}</value>
+  </data>
+  <data name="PaperLimitMessage" xml:space="preserve">
+    <value>紙片の数が上限の 200 枚に達しました。&#x0A;不要な紙片を削除してから新規作成してください。</value>
+  </data>
+  <data name="PaperLimitTitle" xml:space="preserve">
+    <value>紙片数が上限です</value>
+  </data>
+  <data name="Pin" xml:space="preserve">
+    <value>最前面に固定</value>
+  </data>
+  <data name="SaveFailureIgnore" xml:space="preserve">
+    <value>今回は無視</value>
+  </data>
+  <data name="ExitSaveFailureMessage" xml:space="preserve">
+    <value>PaperNook は保存に失敗したため終了します。未保存の変更は失われる可能性があります。</value>
+  </data>
+  <data name="SaveFailureMessage" xml:space="preserve">
+    <value>データの保存に失敗しました:&#x0A;{0}&#x0A;ディスク容量または権限を確認してください。</value>
+  </data>
+  <data name="SaveFailureTitle" xml:space="preserve">
+    <value>保存失敗</value>
+  </data>
+  <data name="StateLoadFailed" xml:space="preserve">
+    <value>データの読み込みに失敗しました。ファイルが使用中、または破損している可能性があります。</value>
+  </data>
+  <data name="StartupFailureMessage" xml:space="preserve">
+    <value>自動起動の設定に失敗しました。権限が不足しているか、セキュリティソフトにブロックされている可能性があります。</value>
+  </data>
+  <data name="StartupFailureTitle" xml:space="preserve">
+    <value>自動起動の設定失敗</value>
+  </data>
+  <data name="ThemeDark" xml:space="preserve">
+    <value>ダーク</value>
+  </data>
+  <data name="SettingsColorScheme" xml:space="preserve">
+    <value>配色</value>
+  </data>
+  <data name="SettingsUiFont" xml:space="preserve">
+    <value>フォント</value>
+  </data>
+  <data name="UiFontDefault" xml:space="preserve">
+    <value>言語既定</value>
+  </data>
+  <data name="UiFontYaHei" xml:space="preserve">
+    <value>YaHei</value>
+  </data>
+  <data name="UiFontDengXian" xml:space="preserve">
+    <value>DengXian</value>
+  </data>
+  <data name="SettingsTextRenderingProfile" xml:space="preserve">
+    <value>文字レンダリング</value>
+  </data>
+  <data name="TextRenderingStandard" xml:space="preserve">
+    <value>標準</value>
+  </data>
+  <data name="TextRenderingSoft" xml:space="preserve">
+    <value>ソフト</value>
+  </data>
+  <data name="TextRenderingSharp" xml:space="preserve">
+    <value>シャープ</value>
+  </data>
+  <data name="ColorSchemeWarm" xml:space="preserve">
+    <value>紙</value>
+  </data>
+  <data name="ColorSchemeInk" xml:space="preserve">
+    <value>墨</value>
+  </data>
+  <data name="ColorSchemeForest" xml:space="preserve">
+    <value>森</value>
+  </data>
+  <data name="ColorSchemeRose" xml:space="preserve">
+    <value>霞</value>
+  </data>
+  <data name="ThemeLight" xml:space="preserve">
+    <value>ライト</value>
+  </data>
+  <data name="ThemeSystem" xml:space="preserve">
+    <value>システムに合わせる</value>
+  </data>
+  <data name="ToolTipCollapseToCapsule" xml:space="preserve">
+    <value>カプセルに折りたたむ</value>
+  </data>
+  <data name="ToolTipHideThisPaper" xml:space="preserve">
+    <value>この紙片を隠す</value>
+  </data>
+  <data name="ToolTipEditTitle" xml:space="preserve">
+    <value>クリックしてタイトルを編集</value>
+  </data>
+  <data name="ToolTipOpenMarkdownEditor" xml:space="preserve">
+    <value>{0} エディターで開く</value>
+  </data>
+  <data name="ToolTipResetTextZoom" xml:space="preserve">
+    <value>クリックして 100% に戻す</value>
+  </data>
+  <data name="ToolTipNewNotePaper" xml:space="preserve">
+    <value>メモ紙を新規作成</value>
+  </data>
+  <data name="ToolTipNewTodoPaper" xml:space="preserve">
+    <value>ToDo紙を新規作成</value>
+  </data>
+  <data name="TrayCapsuleMode" xml:space="preserve">
+    <value>カプセルモード</value>
+  </data>
+  <data name="TrayDeepCapsuleMode" xml:space="preserve">
+    <value>カプセル端寄せモード</value>
+  </data>
+  <data name="SettingsMaxTitleLength" xml:space="preserve">
+    <value>タイトル文字数上限</value>
+  </data>
+  <data name="SettingsCapsuleCollapseAll" xml:space="preserve">
+    <value>メインカプセルを表示</value>
+  </data>
+  <data name="SettingsShowDeepCapsuleWhileExpanded" xml:space="preserve">
+    <value>展開中も端のカプセルを残す</value>
+  </data>
+  <data name="SettingsRememberDeepCapsuleExpandedPosition" xml:space="preserve">
+    <value>展開位置を記憶</value>
+  </data>
+  <data name="SettingsCollapseExpandedDeepCapsuleOnClick" xml:space="preserve">
+    <value>端のカプセルを再クリックして紙片を戻す</value>
+  </data>
+  <data name="SettingsHideEdgeCapsuleCloseButtonOnHover" xml:space="preserve">
+    <value>閉じるボタンを隠す</value>
+  </data>
+  <data name="CapsuleCollapseAllLabel" xml:space="preserve">
+    <value>折りたたむ</value>
+  </data>
+  <data name="CapsuleCollapseAllExpandedTip" xml:space="preserve">
+    <value>現在のカプセル列を折りたたむ</value>
+  </data>
+  <data name="CapsuleCollapseAllCollapsedTip" xml:space="preserve">
+    <value>現在のカプセル列を展開</value>
+  </data>
+  <data name="CapsuleCollapseAllCountFormat" xml:space="preserve">
+    <value>{0} 個</value>
+  </data>
+  <data name="TrayExit" xml:space="preserve">
+    <value>終了</value>
+  </data>
+  <data name="TrayHideAll" xml:space="preserve">
+    <value>すべての紙片を隠す</value>
+  </data>
+  <data name="TrayMarkdownRenderMode" xml:space="preserve">
+    <value>Markdown 表示</value>
+  </data>
+  <data name="SettingsFullscreenTopmostMode" xml:space="preserve">
+    <value>全画面を避ける</value>
+  </data>
+  <data name="SettingsTodoVisualSize" xml:space="preserve">
+    <value>ToDo サイズ</value>
+  </data>
+  <data name="TodoVisualSizeSmall" xml:space="preserve">
+    <value>小</value>
+  </data>
+  <data name="TodoVisualSizeMedium" xml:space="preserve">
+    <value>中</value>
+  </data>
+  <data name="TodoVisualSizeLarge" xml:space="preserve">
+    <value>大</value>
+  </data>
+  <data name="TodoVisualSizeExtraLarge" xml:space="preserve">
+    <value>特大</value>
+  </data>
+  <data name="TrayInlineConfirmDelete" xml:space="preserve">
+    <value>⚠ 削除</value>
+  </data>
+  <data name="TrayInlineConfirmAction" xml:space="preserve">
+    <value>確認</value>
+  </data>
+  <data name="TrayNewNote" xml:space="preserve">
+    <value>メモ紙を作成</value>
+  </data>
+  <data name="TrayNewTodo" xml:space="preserve">
+    <value>ToDo紙を作成</value>
+  </data>
+  <data name="TrayPapers" xml:space="preserve">
+    <value>紙片</value>
+  </data>
+  <data name="TrayShowAll" xml:space="preserve">
+    <value>すべての紙片を表示</value>
+  </data>
+  <data name="TraySettings" xml:space="preserve">
+    <value>設定</value>
+  </data>
+  <data name="SettingsExternalMarkdownExtension" xml:space="preserve">
+    <value>外部で開くファイル形式</value>
+  </data>
+  <data name="SettingsQuickActions" xml:space="preserve">
+    <value>クイック操作</value>
+  </data>
+  <data name="SettingsDisplay" xml:space="preserve">
+    <value>表示</value>
+  </data>
+  <data name="SettingsExternalOpen" xml:space="preserve">
+    <value>外部で開く</value>
+  </data>
+  <data name="SettingsScriptCapsule" xml:space="preserve">
+    <value>スクリプトカプセル</value>
+  </data>
+  <data name="SettingsTopBarButtons" xml:space="preserve">
+    <value>上部バーのボタン</value>
+  </data>
+  <data name="SettingsBehavior" xml:space="preserve">
+    <value>基本動作</value>
+  </data>
+  <data name="SettingsAdvancedMode" xml:space="preserve">
+    <value>詳細モード</value>
+  </data>
+  <data name="SettingsRestorePageDefaults" xml:space="preserve">
+    <value>既定に戻す</value>
+  </data>
+  <data name="TipAdvancedSettingsMode" xml:space="preserve">
+    <value>オンにすると詳細設定を表示します。
+オフにしても項目が隠れるだけで、選択済みの値は変わりません。</value>
+  </data>
+  <data name="SettingsCapsule" xml:space="preserve">
+    <value>カプセル</value>
+  </data>
+  <data name="SettingsTodoPaper" xml:space="preserve">
+    <value>ToDo とノート</value>
+  </data>
+  <data name="SettingsRunLinkedScriptCapsulesOnClick" xml:space="preserve">
+    <value>関連スクリプトを直接実行</value>
+  </data>
+  <data name="SettingsGeneral" xml:space="preserve">
+    <value>一般</value>
+  </data>
+  <data name="TipThemeMode" xml:space="preserve">
+    <value>ライト、ダーク、または Windows のシステムテーマに合わせます。</value>
+  </data>
+  <data name="TipColorScheme" xml:space="preserve">
+    <value>紙片の配色：背景、アクセント、弱い文字色。</value>
+  </data>
+  <data name="TipUiFont" xml:space="preserve">
+    <value>言語既定では、UI とノート本文にそれぞれ適したシステムフォントを使います。
+YaHei または DengXian を選ぶと、UI・トレイ・カプセル・ToDo・ノートをそのフォントに統一します。
+アプリフォルダーに papernook.ttf / .otf がある場合はそれを優先します。</value>
+  </data>
+  <data name="TipTextRenderingProfile" xml:space="preserve">
+    <value>標準：Windows/WPF 既定経路。互換性重視。
+ソフト：縦横グレースケール平滑化。表示倍率によっては柔らかく見えることがあります。
+シャープ：ピクセル位置合わせを強化。輪郭は明瞭ですが、一部フォントで文字幅がわずかに変わる場合があります。</value>
+  </data>
+  <data name="SettingsCustomFontEnhancedBold" xml:space="preserve">
+    <value>カスタムフォントの太字強化</value>
+  </data>
+  <data name="TipCustomFontEnhancedBold" xml:space="preserve">
+    <value>「太字」にした文字は、アプリフォルダーの太字ファイルを使います。
+papernook と PaperNook_Bold（.ttf/.otf）の両方を置いてください。</value>
+  </data>
+  <data name="TipMarkdownRender" xml:space="preserve">
+    <value>基本：Markdown 記号を残しつつ構文記号を薄くし、リストの丸印や区切り線などの軽い整形を表示します。
+フル レンダリング：編集中も見出し・リスト・引用・コードなどを最終レイアウトで表示し、大半の Markdown 記号を隠します。カーソルのあるブロックでは編集用に記号を表示し、フォーカスが外れると全体を読み取り専用で表示します。</value>
+  </data>
+  <data name="SettingsMarkdownEditAnimation" xml:space="preserve">
+    <value>Markdown レンダリング アニメーション</value>
+  </data>
+  <data name="TipMarkdownEditAnimation" xml:space="preserve">
+    <value>カーソルがブロックの編集状態に入り、その Markdown 記号が現れるとき、フェードイン アニメーションでソース記号を表示します。</value>
+  </data>
+  <data name="TipFullscreenTopmostMode" xml:space="preserve">
+    <value>動画やゲームなどの全画面を検出したとき、紙片と端のカプセルを一時的に避けられます。
+「最前面のまま」なら常に表示します。</value>
+  </data>
+  <data name="TipTodoVisualSize" xml:space="preserve">
+    <value>ToDo の文字、行高、間隔を調整します。</value>
+  </data>
+  <data name="TipEnableTodoPaperLinks" xml:space="preserve">
+    <value>任意の紙片を ToDo 項目へドラッグして関連付け、その項目から紙片を開けます。</value>
+  </data>
+  <data name="TipShowLinkedPaperName" xml:space="preserve">
+    <value>ToDo の後ろに関連紙片のタイトルを表示します。</value>
+  </data>
+  <data name="TipAllowLongLinkedPaperTitles" xml:space="preserve">
+    <value>オフ：コンパクト。オン：内容に合わせて広げます。
+1 行は全角約 5 文字、複数行は約 10 文字。</value>
+  </data>
+  <data name="TipHideLinkedPapersFromCapsules" xml:space="preserve">
+    <value>ToDo に関連付けた紙片はカプセル一覧に出さず、入口の重複を避けます。</value>
+  </data>
+  <data name="TipRunLinkedScriptCapsulesOnClick" xml:space="preserve">
+    <value>関連先がスクリプトカプセルのとき：左クリックで実行、右クリックで編集。</value>
+  </data>
+  <data name="TipNewTodoButton" xml:space="preserve">
+    <value>紙片上部バーに「新規 ToDo」を表示します。</value>
+  </data>
+  <data name="TipNewNoteButton" xml:space="preserve">
+    <value>紙片上部バーに「新規ノート」を表示します。</value>
+  </data>
+  <data name="TipExternalOpenButton" xml:space="preserve">
+    <value>上部バーの外部で開く：ノートを一時ファイルに書き、既定アプリに渡します。</value>
+  </data>
+  <data name="TipExternalExtension" xml:space="preserve">
+    <value>外部で開くときの拡張子。例：.md、.txt。</value>
+  </data>
+  <data name="TipCapsuleMode" xml:space="preserve">
+    <value>紙片を小さなカプセルに折りたたみ、デスクトップを空けます。端寄せなどは先にこれをオンにします。</value>
+  </data>
+  <data name="TipDeepCapsuleMode" xml:space="preserve">
+    <value>カプセルを画面端に固定して列に並べ、ホバーでスライド表示します。</value>
+  </data>
+  <data name="TipShowDeepCapsuleWhileExpanded" xml:space="preserve">
+    <value>端のカプセルから開いた後も入口を残します。オフでは開いている間だけ隠します。</value>
+  </data>
+  <data name="TipRememberDeepCapsuleExpandedPosition" xml:space="preserve">
+    <value>端から開くとき、前回の位置とサイズを復元します。使えない場合は端寄せで開きます。</value>
+  </data>
+  <data name="TipCollapseExpandedDeepCapsuleOnClick" xml:space="preserve">
+    <value>端から開いた紙片に対し、同じカプセルをもう一度クリックすると戻します。</value>
+  </data>
+  <data name="TipCapsuleCollapseAll" xml:space="preserve">
+    <value>列の先頭にメインカプセルを表示し、現在の列を一括で折りたたみ／展開します。</value>
+  </data>
+  <data name="TipHideEdgeCapsuleCloseButtonOnHover" xml:space="preserve">
+    <value>ホバー時も通常どおり伸びますが、追加領域は閉じるボタンのない通常のカプセル領域として動作します。閉じる場合は右クリックメニューの「隠す」を使います。</value>
+  </data>
+  <data name="TipMaxTitleLength" xml:space="preserve">
+    <value>紙片タイトルとカプセルに表示する最大文字数。</value>
+  </data>
+  <data name="TipStartup" xml:space="preserve">
+    <value>Windows 起動時に PaperNook を自動起動します。</value>
+  </data>
+  <data name="SettingsEnableToolTips" xml:space="preserve">
+    <value>ホバー時のヒントを表示</value>
+  </data>
+  <data name="SettingsHidePapersFromTaskbar" xml:space="preserve">
+    <value>タスクバーからアイコンを隠す</value>
+  </data>
+  <data name="TipHidePapersFromTaskbar" xml:space="preserve">
+    <value>展開中の紙片をタスクバーに出しません。
+トレイ、デスクトップ上の紙片、カプセルからは引き続き開けます。
+「ウィンドウ切り替えから隠す」をオンにすると同時に有効になります。</value>
+  </data>
+  <data name="SettingsHidePapersFromWindowSwitcher" xml:space="preserve">
+    <value>ウィンドウ切り替えから紙片を隠す</value>
+  </data>
+  <data name="TipHidePapersFromWindowSwitcher" xml:space="preserve">
+    <value>展開中の紙片を Alt+Tab とタスクビューから隠し、タスクバーアイコンも同時に隠します。
+トレイ、デスクトップ上の紙片、カプセルからは引き続き開けます。このモードでは紙片がすべての仮想デスクトップに表示されるため、ラボの現在のデスクトップでの呼び出しは利用できません。</value>
+  </data>
+  <data name="TipEnableToolTips" xml:space="preserve">
+    <value>ボタンや操作できる領域にポインターを置いたとき短い説明を表示します。
+設定の説明アイコンは常に使えます。</value>
+  </data>
+  <data name="SettingsEnableAnimations" xml:space="preserve">
+    <value>アニメーションを有効化</value>
+  </data>
+  <data name="TipEnableAnimations" xml:space="preserve">
+    <value>よく使う操作に遷移アニメーションを付けます。オフにすると反応がより直接的になります。</value>
+  </data>
+  <data name="SettingsResizeGripMode" xml:space="preserve">
+    <value>リサイズグリップ</value>
+  </data>
+  <data name="TipResizeGripMode" xml:space="preserve">
+    <value>紙のサイズ変更：標準は右下に不透明のドットを表示し、柔和は約 50% 透明にします。非表示はドットを消し、紙の四辺または四隅をドラッグしてサイズ変更できます。
+色は Windows の明暗を主に、配色をごく薄く乗せます。形はそのままです。</value>
+  </data>
+  <data name="ResizeGripModeStandard" xml:space="preserve">
+    <value>標準</value>
+  </data>
+  <data name="ResizeGripModeSoft" xml:space="preserve">
+    <value>柔和</value>
+  </data>
+  <data name="ResizeGripModeHidden" xml:space="preserve">
+    <value>非表示</value>
+  </data>
+  <data name="TipPersistentPowerShellProcess" xml:space="preserve">
+    <value>!pf / !powerf は常駐プロセスを使い起動を速くしますが、変数や状態がスクリプト間に残ることがあります。
+オフにするとそのプロセスを終了します。</value>
+  </data>
+  <data name="TipPreferPowerShell7" xml:space="preserve">
+    <value>pwsh.exe（PowerShell 7）を優先し、なければ Windows PowerShell に戻ります。
+スクリプト内で !pwsh / !ps5 も指定できます。</value>
+  </data>
+  <data name="TipHideScriptRunWindow" xml:space="preserve">
+    <value>スクリプト実行ウィンドウを隠します。
+!p / !power は終了を待ってエラーを取得し、!pf / !powerf は常駐プロセスへ投入するだけです。</value>
+  </data>
+  <data name="TipAutoClearCompletedTodos" xml:space="preserve">
+    <value>完了にした直後、現在の紙片から削除します。元に戻すで復元できます。</value>
+  </data>
+  <data name="TipAutoCompressLargeImages" xml:space="preserve">
+    <value>8 MB 超、またはいずれかの辺が 2048 ピクセル超のとき、最長辺 2048 まで縮小して再エンコードを試みます。
+安全に圧縮できない・失敗・なお 8 MB 超・小さくならない場合はインポートを中止します。
+オフでは圧縮せず、8 MB 超は直ちに拒否します。
+設定に関係なく、いずれかの辺が 4096 ピクセル超なら拒否します。</value>
+  </data>
+  <data name="SettingsEnableTodoPaperLinks" xml:space="preserve">
+    <value>ToDo と紙片の関連付けを有効化</value>
+  </data>
+  <data name="SettingsAutoClearCompletedTodos" xml:space="preserve">
+    <value>完了した ToDo を自動クリア</value>
+  </data>
+  <data name="SettingsAutoCompressLargeImages" xml:space="preserve">
+    <value>大きすぎる画像を自動圧縮</value>
+  </data>
+  <data name="SettingsPersistentPowerShellProcess" xml:space="preserve">
+    <value>PowerShell プロセスを常駐</value>
+  </data>
+  <data name="SettingsPreferPowerShell7" xml:space="preserve">
+    <value>PowerShell 7 を優先</value>
+  </data>
+  <data name="SettingsHideScriptRunWindow" xml:space="preserve">
+    <value>スクリプトウィンドウを隠す</value>
+  </data>
+  <data name="SettingsShowTopBarNewTodoButton" xml:space="preserve">
+    <value>新規 ToDo ボタンを表示</value>
+  </data>
+  <data name="SettingsShowTopBarNewNoteButton" xml:space="preserve">
+    <value>新規ノートボタンを表示</value>
+  </data>
+  <data name="SettingsShowTopBarExternalOpenButton" xml:space="preserve">
+    <value>外部で開くボタンを表示</value>
+  </data>
+  <data name="SettingsShowLinkedPaperName" xml:space="preserve">
+    <value>関連紙片のタイトルを表示</value>
+  </data>
+  <data name="SettingsAllowLongLinkedPaperTitles" xml:space="preserve">
+    <value>関連タイトルを長く表示</value>
+  </data>
+  <data name="SettingsHideLinkedPapersFromCapsules" xml:space="preserve">
+    <value>関連紙片をカプセルに表示しない</value>
+  </data>
+  <data name="SettingsResetNoteZoom" xml:space="preserve">
+    <value>ノートのズームを戻す</value>
+  </data>
+  <data name="SettingsRestoreAllCapsules" xml:space="preserve">
+    <value>すべてのカプセルを展開</value>
+  </data>
+  <data name="TrayStartup" xml:space="preserve">
+    <value>Windows 起動時に開始</value>
+  </data>
+  <data name="TrayThemeMode" xml:space="preserve">
+    <value>テーマ</value>
+  </data>
+  <data name="Unpin" xml:space="preserve">
+    <value>固定を解除</value>
+  </data>
+  <data name="SettingsShortcuts" xml:space="preserve">
+    <value>ショートカット</value>
+  </data>
+  <data name="SettingsVisual" xml:space="preserve">
+    <value>表示</value>
+  </data>
+  <data name="SettingsLabs" xml:space="preserve">
+    <value>ラボ</value>
+  </data>
+  <data name="SettingsLabsIntro" xml:space="preserve">
+    <value>これらは試験中の機能で、動作や設定項目が今後変わる場合があります。各機能は個別に有効化され、オフにすると関連する動作状態を直ちに停止します。</value>
+  </data>
+  <data name="LabsFocusBehavior" xml:space="preserve">
+    <value>フォーカスと待機時の動作</value>
+  </data>
+  <data name="LabsEdgeCapsuleHoverIntent" xml:space="preserve">
+    <value>エッジプレビューのホバー判定</value>
+  </data>
+  <data name="LabsEnableEdgeCapsuleHoverPreview" xml:space="preserve">
+    <value>ホバープレビューを有効にする</value>
+  </data>
+  <data name="TipLabsEdgeCapsuleHoverPreview" xml:space="preserve">
+    <value>エッジカプセルをホバーでプレビュー展開するかを制御します。オフにすると現在のプレビューを直ちに閉じますが、クリック、ドラッグ、カプセル自体の動作には影響しません。</value>
+  </data>
+  <data name="LabsEnableEdgeCapsuleHoverIntent" xml:space="preserve">
+    <value>ポインター意図予測を有効にする</value>
+  </data>
+  <data name="TipLabsEdgeCapsuleHoverIntent" xml:space="preserve">
+    <value>ポインターの速度、方向、減速傾向に基づき、素早く通過するときのプレビュー展開を遅延または抑制します。展開後、カプセル列の外接矩形内にある空白領域では、閲覧可能なカプセルへ明確に向かう軌跡だけを保持し、それ以外は感度に応じて約 0.2～0.8 秒後に閉じます。外接矩形を出ると即座に閉じます。オフにすると最初のプレビューは即座に開き、その後の切り替えには固定 50 ms の安定待ちを使用し、空白領域は方向を判定せず固定 1 秒だけ保持します。</value>
+  </data>
+  <data name="LabsEdgeCapsuleHoverIntentSensitivity" xml:space="preserve">
+    <value>意図判定の感度</value>
+  </data>
+  <data name="TipLabsEdgeCapsuleHoverIntentSensitivity" xml:space="preserve">
+    <value>「最低」から「最高」までの 5 段階です。低いほど対象上での明確な停止が必要になり、空白領域も長く保持します。高いほど開きやすく、対象のない空白領域も早く解放します。「中」は推奨バランスです。</value>
+  </data>
+  <data name="EdgeCapsuleHoverIntentSensitivityVeryLow" xml:space="preserve">
+    <value>最低</value>
+  </data>
+  <data name="EdgeCapsuleHoverIntentSensitivityLow" xml:space="preserve">
+    <value>低</value>
+  </data>
+  <data name="EdgeCapsuleHoverIntentSensitivityMedium" xml:space="preserve">
+    <value>中</value>
+  </data>
+  <data name="EdgeCapsuleHoverIntentSensitivityHigh" xml:space="preserve">
+    <value>高</value>
+  </data>
+  <data name="EdgeCapsuleHoverIntentSensitivityVeryHigh" xml:space="preserve">
+    <value>最高</value>
+  </data>
+  <data name="LabsWindowCoordination" xml:space="preserve">
+    <value>ウィンドウ連携システム</value>
+  </data>
+  <data name="LabsCollapsePaperOnDeactivate" xml:space="preserve">
+    <value>フォーカスを失ったら付箋を自動で折りたたむ</value>
+  </data>
+  <data name="TipLabsCollapsePaperOnDeactivate" xml:space="preserve">
+    <value>フォーカスを失った付箋をカプセルに折りたたみます。ドラッグ中、タイトル編集中、メニューやドロップダウンを開いている間は実行されません。カプセルモードが必要です。</value>
+  </data>
+  <data name="LabsPaperOpacity" xml:space="preserve">
+    <value>付箋の透明度</value>
+  </data>
+  <data name="LabsEnableInactivePaperOpacity" xml:space="preserve">
+    <value>非アクティブ時に半透明にする</value>
+  </data>
+  <data name="TipLabsInactivePaperOpacity" xml:space="preserve">
+    <value>展開中で非アクティブな付箋だけに適用されます。アクティブにするとすぐ不透明に戻ります。</value>
+  </data>
+  <data name="LabsInactivePaperOpacityLevel" xml:space="preserve">
+    <value>非アクティブ時の不透明度</value>
+  </data>
+  <data name="LabsCapsuleOpacity" xml:space="preserve">
+    <value>カプセルの透明度</value>
+  </data>
+  <data name="LabsEnableRestingCapsuleOpacity" xml:space="preserve">
+    <value>待機中に半透明にする</value>
+  </data>
+  <data name="TipLabsRestingCapsuleOpacity" xml:space="preserve">
+    <value>通常カプセルと端カプセルの待機中だけに適用されます。ホバー、アクティブ、ドラッグ時は不透明に戻り、メインカプセルは変わりません。</value>
+  </data>
+  <data name="LabsRestingCapsuleOpacityLevel" xml:space="preserve">
+    <value>待機中の不透明度</value>
+  </data>
+  <data name="LabsEnableCapsuleMagnetism" xml:space="preserve">
+    <value>通常カプセルのスナップを有効にする</value>
+  </data>
+  <data name="TipLabsCapsuleMagnetism" xml:space="preserve">
+    <value>通常カプセルをドラッグすると吸着先が表示されます。画面または他のアプリのウィンドウ端付近で離すと吸着して追従します。ウィンドウ連携も有効な場合、ウィンドウに吸着したカプセルを開いても同じウィンドウへの連携を維持します。端のキュー外のカプセルだけが対象で、再ドラッグ、対象の消失、または機能のオフで解除されます。</value>
+  </data>
+  <data name="LabsCapsuleMagnetEdgeModeNotice" xml:space="preserve">
+    <value>現在は端カプセルが有効なため、折りたたんだ付箋は端のキューに入り、通常カプセルの吸着対象にはなりません。この機能を使うには一般設定で端カプセルをオフにしてください。</value>
+  </data>
+  <data name="LabsMagnetScreenEdges" xml:space="preserve">
+    <value>画面の端</value>
+  </data>
+  <data name="LabsMagnetWindowEdges" xml:space="preserve">
+    <value>ウィンドウの端</value>
+  </data>
+  <data name="LabsMagnetDistance" xml:space="preserve">
+    <value>反応距離</value>
+  </data>
+  <data name="LabsMagnetDistanceValueFormat" xml:space="preserve">
+    <value>約 {0} px</value>
+  </data>
+  <data name="LabsCapsuleMagnetDetach" xml:space="preserve">
+    <value>カプセルの吸着を解除</value>
+  </data>
+  <data name="LabsEnableWindowTethering" xml:space="preserve">
+    <value>ウィンドウ連携を有効にする</value>
+  </data>
+  <data name="TipLabsWindowTethering" xml:space="preserve">
+    <value>展開した付箋のタイトルバーにある連携ボタンを、別のアプリのウィンドウへドラッグします。Todo とノートの両方を連携でき、解除後は予約されていた端カプセルの位置も復元されます。</value>
+  </data>
+  <data name="LabsWindowTetherPreferredEdge" xml:space="preserve">
+    <value>連携位置</value>
+  </data>
+  <data name="LabsWindowTetherEdgeAuto" xml:space="preserve">
+    <value>自動</value>
+  </data>
+  <data name="LabsWindowTetherEdgeLeft" xml:space="preserve">
+    <value>左</value>
+  </data>
+  <data name="LabsWindowTetherEdgeRight" xml:space="preserve">
+    <value>右</value>
+  </data>
+  <data name="LabsWindowTetherEdgeTop" xml:space="preserve">
+    <value>上</value>
+  </data>
+  <data name="LabsWindowTetherEdgeBottom" xml:space="preserve">
+    <value>下</value>
+  </data>
+  <data name="LabsWindowTetherGap" xml:space="preserve">
+    <value>対象との間隔</value>
+  </data>
+  <data name="LabsWindowTetherGapValueFormat" xml:space="preserve">
+    <value>約 {0} px</value>
+  </data>
+  <data name="LabsWindowTetherDetach" xml:space="preserve">
+    <value>ウィンドウ連携を解除</value>
+  </data>
+  <data name="LabsEnableTetherVisibility" xml:space="preserve">
+    <value>対象が非表示のとき収納する</value>
+  </data>
+  <data name="TipLabsTetherVisibility" xml:space="preserve">
+    <value>対象が最小化または非表示になると、連携した付箋を一時的に隠すか、独立したカプセルに置き換えます。対象を復元またはアクティブにすると、付箋自体の展開、カプセル、表示状態を変えずに再表示します。</value>
+  </data>
+  <data name="ToolTipDragPaperToWindow" xml:space="preserve">
+    <value>別のアプリのウィンドウへドラッグして連携</value>
+  </data>
+  <data name="ToolTipWindowBindingActiveFormat" xml:space="preserve">
+    <value>「{0}」と連携中。ドラッグで変更、右クリックで連携解除</value>
+  </data>
+  <data name="WindowBindingDragHint" xml:space="preserve">
+    <value>連携するアプリのウィンドウへドラッグ</value>
+  </data>
+  <data name="WindowBindingDropTargetFormat" xml:space="preserve">
+    <value>離すと「{0}」に連携</value>
+  </data>
+  <data name="LabsTetherMinimizedBehavior" xml:space="preserve">
+    <value>対象が最小化されたとき</value>
+  </data>
+  <data name="LabsTetherMinimizedHide" xml:space="preserve">
+    <value>付箋を隠す</value>
+  </data>
+  <data name="LabsTetherMinimizedCapsule" xml:space="preserve">
+    <value>カプセルを表示</value>
+  </data>
+  <data name="LabsTetherCapsuleLabelFormat" xml:space="preserve">
+    <value>連携 · {0}</value>
+  </data>
+  <data name="LabsTetherCapsuleTargetTipFormat" xml:space="preserve">
+    <value>クリックして「{0}」を復元してアクティブにします</value>
+  </data>
+  <data name="LabsTodoReminders" xml:space="preserve">
+    <value>ToDo リマインダー</value>
+  </data>
+  <data name="LabsEnableTodoReminders" xml:space="preserve">
+    <value>ToDo リマインダーを有効にする</value>
+  </data>
+  <data name="TipLabsTodoReminders" xml:space="preserve">
+    <value>ToDo 行のボタンまたは右クリックメニューから時刻を設定できます。簡潔なカウントダウンをクリックしていつでも変更または解除でき、期限になるとトレイで通知します。機能をオフにすると計時と入口を停止しますが、保存済みの時刻は保持されます。</value>
+  </data>
+  <data name="LabsTodoReminderShowButton" xml:space="preserve">
+    <value>行内リマインダーボタンを表示</value>
+  </data>
+  <data name="TipLabsTodoReminderShowButton" xml:space="preserve">
+    <value>オフにするとベルボタンを隠し、新しいリマインダーは ToDo の右クリックメニューから作成します。設定済みのカウントダウンは表示され、クリックして変更または解除できます。</value>
+  </data>
+  <data name="LabsTodoReminderQuickMinutes" xml:space="preserve">
+    <value>既定のクイックリマインダー</value>
+  </data>
+  <data name="TodoReminderMinutesValueFormat" xml:space="preserve">
+    <value>{0} 分</value>
+  </data>
+  <data name="TodoReminderSetForFormat" xml:space="preserve">
+    <value>リマインダー：{0}。クリックで変更または解除</value>
+  </data>
+  <data name="TodoReminderSet" xml:space="preserve">
+    <value>リマインダーを設定</value>
+  </data>
+  <data name="TodoReminderMenuHeader" xml:space="preserve">
+    <value>リマインダー時刻</value>
+  </data>
+  <data name="TodoReminderMenuUnavailable" xml:space="preserve">
+    <value>現在はリマインダーを設定できません</value>
+  </data>
+  <data name="TodoReminderInMinutesFormat" xml:space="preserve">
+    <value>{0} 分後</value>
+  </data>
+  <data name="TodoReminderDefaultSuffix" xml:space="preserve">
+    <value>（既定）</value>
+  </data>
+  <data name="TodoReminderPresetAtFormat" xml:space="preserve">
+    <value>{0}</value>
+  </data>
+  <data name="TodoReminderCustom" xml:space="preserve">
+    <value>時刻を指定…</value>
+  </data>
+  <data name="TodoReminderClear" xml:space="preserve">
+    <value>リマインダーを解除</value>
+  </data>
+  <data name="TodoReminderCustomTitle" xml:space="preserve">
+    <value>ToDo リマインダーの指定</value>
+  </data>
+  <data name="TodoReminderCustomHint" xml:space="preserve">
+    <value>日付と時刻を直接入力できます。加減ボタンの長押しで素早く調整できます。</value>
+  </data>
+  <data name="TodoReminderDate" xml:space="preserve">
+    <value>日付</value>
+  </data>
+  <data name="TodoReminderTime" xml:space="preserve">
+    <value>時刻</value>
+  </data>
+  <data name="TodoReminderToday" xml:space="preserve">
+    <value>今日</value>
+  </data>
+  <data name="TodoReminderTomorrow" xml:space="preserve">
+    <value>明日</value>
+  </data>
+  <data name="TodoReminderInvalidDate" xml:space="preserve">
+    <value>2026-08-01 のような有効な日付を入力してください。</value>
+  </data>
+  <data name="TodoReminderInvalidTime" xml:space="preserve">
+    <value>09:30 のような有効な時刻を入力してください。</value>
+  </data>
+  <data name="TodoReminderSelectionFormat" xml:space="preserve">
+    <value>{0}・{1:00}:{2:00}</value>
+  </data>
+  <data name="TodoReminderFutureRequired" xml:space="preserve">
+    <value>現在より後の時刻を選択してください。</value>
+  </data>
+  <data name="TodoReminderInvalidLocalTime" xml:space="preserve">
+    <value>夏時間の切り替えにより存在しない時刻です。別の時刻を選択してください。</value>
+  </data>
+  <data name="TodoReminderBalloonTitle" xml:space="preserve">
+    <value>ToDo リマインダー</value>
+  </data>
+  <data name="TodoReminderBalloonSingleFormat" xml:space="preserve">
+    <value>{0}・{1}</value>
+  </data>
+  <data name="TodoReminderBalloonMultipleFormat" xml:space="preserve">
+    <value>{0} 件の ToDo が期限です。先頭：{1}</value>
+  </data>
+  <data name="TodoReminderUnnamed" xml:space="preserve">
+    <value>（名前のない ToDo）</value>
+  </data>
+  <data name="TodoReminderCountdownNow" xml:space="preserve">
+    <value>今</value>
+  </data>
+  <data name="TodoReminderCountdownMinutesFormat" xml:space="preserve">
+    <value>{0}分</value>
+  </data>
+  <data name="TodoReminderCountdownHoursFormat" xml:space="preserve">
+    <value>{0}時間</value>
+  </data>
+  <data name="TodoReminderCountdownDaysFormat" xml:space="preserve">
+    <value>{0}日</value>
+  </data>
+  <data name="LabsPassiveMode" xml:space="preserve">
+    <value>ショートカットで背面化</value>
+  </data>
+  <data name="LabsCurrentPaperPassive" xml:space="preserve">
+    <value>現在の付箋をクリック透過して背面へ</value>
+  </data>
+  <data name="TipLabsCurrentPaperPassive" xml:space="preserve">
+    <value>ショートカットを押すと、最後にアクティブだった付箋が他のウィンドウの背面に移動し、クリックが透過します。もう一度押すと復元し、このスイッチをオフにしてもすぐ復元します。</value>
+  </data>
+  <data name="LabsAllSurfacesPassive" xml:space="preserve">
+    <value>すべての付箋とカプセルをクリック透過して背面へ</value>
+  </data>
+  <data name="TipLabsAllSurfacesPassive" xml:space="preserve">
+    <value>すべての付箋、通常カプセル、端カプセル、メインカプセルが対象です。もう一度押すと復元します。カプセルのドラッグ中は切り替わりません。</value>
+  </data>
+  <data name="LabsShortcut" xml:space="preserve">
+    <value>ショートカット</value>
+  </data>
+  <data name="TrayRestoreInteraction" xml:space="preserve">
+    <value>付箋とカプセルの操作を復元</value>
+  </data>
+  <data name="SettingsOverallFontScale" xml:space="preserve">
+    <value>全体の文字サイズ</value>
+  </data>
+  <data name="TipOverallFontScale" xml:space="preserve">
+    <value>全体の文字を 80%～120% で 5% 刻みに調整します。
+ノートごとの倍率はさらに加算されます。</value>
+  </data>
+  <data name="SettingsImageReferenceText" xml:space="preserve">
+    <value>画像マークアップ表示</value>
+  </data>
+  <data name="TipImageReferenceText" xml:space="preserve">
+    <value>画像の Markdown マークアップ表示を制御します。
+「編集時のみ」：閲覧中は隠す。
+「常に非表示」：文字は透明のまま選択できます。</value>
+  </data>
+  <data name="ImageReferenceTextAlways" xml:space="preserve">
+    <value>常に表示</value>
+  </data>
+  <data name="ImageReferenceTextEditing" xml:space="preserve">
+    <value>編集時のみ</value>
+  </data>
+  <data name="ImageReferenceTextHidden" xml:space="preserve">
+    <value>常に非表示</value>
+  </data>
+  <data name="SettingsTextBold" xml:space="preserve">
+    <value>太字</value>
+  </data>
+  <data name="SettingsNoteBodyText" xml:space="preserve">
+    <value>ノート本文</value>
+  </data>
+  <data name="TipNoteBodyTextStyle" xml:space="preserve">
+    <value>全体サイズの上に小／中／大を載せ、太字も切り替えます。
+ノートごとの倍率はさらに加算されます。</value>
+  </data>
+  <data name="SettingsTodoBodyText" xml:space="preserve">
+    <value>ToDo 本文</value>
+  </data>
+  <data name="TipTodoBodyTextStyle" xml:space="preserve">
+    <value>ToDo 本文と行高：小／中／大、太字可。</value>
+  </data>
+  <data name="SettingsTitleText" xml:space="preserve">
+    <value>タイトル文字</value>
+  </data>
+  <data name="TipTitleTextStyle" xml:space="preserve">
+    <value>紙片上部タイトル：小／中／大、太字可。</value>
+  </data>
+  <data name="SettingsCapsuleText" xml:space="preserve">
+    <value>カプセル文字</value>
+  </data>
+  <data name="TipCapsuleTextStyle" xml:space="preserve">
+    <value>通常・エッジ・ドラッグ・マスターのカプセル文字：共通の小／中／大と太字。</value>
+  </data>
+  <data name="SettingsDeepCapsuleTitleMeasureLimit" xml:space="preserve">
+    <value>エッジタイトルの最大長</value>
+  </data>
+  <data name="TipDeepCapsuleTitleMeasureLimit" xml:space="preserve">
+    <value>静止時のエッジカプセルのタイトル長を制限します。0 は文字のみ非表示にし、アイコンと保存済みタイトルは保持します。＋／−で「無制限、0、1…20」を循環します。ホバープレビューがオフの場合、ホバーで省略されたタイトルを広げ、離れると戻します。</value>
+  </data>
+  <data name="SettingsAllCharacters" xml:space="preserve">
+    <value>無制限</value>
+  </data>
+  <data name="ShortcutEnabledHeader" xml:space="preserve">
+    <value>有効</value>
+  </data>
+  <data name="ShortcutEnableTip" xml:space="preserve">
+    <value>切り替えると、このグローバルショートカットをすぐに登録または解除します。</value>
+  </data>
+  <data name="ShortcutStatusDisabled" xml:space="preserve">
+    <value>無効</value>
+  </data>
+  <data name="ShortcutGroupGeneral" xml:space="preserve">
+    <value>一般</value>
+  </data>
+  <data name="ShortcutGroupEdgeSequences" xml:space="preserve">
+    <value>サイドカプセルをすばやく起動</value>
+  </data>
+  <data name="ShortcutGroupEdgeSequencesTip" xml:space="preserve">
+    <value>修飾キー + 数字 1～9 でサイドキューの N 番目のカプセルを開きます。
+マスターカプセルは番号に含みません。</value>
+  </data>
+  <data name="ShortcutEdgeEnableTip" xml:space="preserve">
+    <value>切り替えると、同じ側の 1～9 をすぐに登録または解除します。</value>
+  </data>
+  <data name="ShortcutEdgeKeyTip" xml:space="preserve">
+    <value>修飾キー（Ctrl / Alt / Shift / Win）を 2～3 個同時に押して離すと記録完了です。
+数字 1～9 は固定。左右で同じ修飾キーは使えません。</value>
+  </data>
+  <data name="ShortcutEdgeLeftSequence" xml:space="preserve">
+    <value>左側キュー</value>
+  </data>
+  <data name="ShortcutEdgeRightSequence" xml:space="preserve">
+    <value>右側キュー</value>
+  </data>
+  <data name="ShortcutEdgeLeftTip" xml:space="preserve">
+    <value>このモニターの左キュー 1～9 を優先し、対側・隣接モニターの順で探します。
+既定の修飾キー：Ctrl+Shift。</value>
+  </data>
+  <data name="ShortcutEdgeRightTip" xml:space="preserve">
+    <value>このモニターの右キュー 1～9 を優先し、対側・隣接モニターの順で探します。
+既定の修飾キー：Ctrl+Alt。</value>
+  </data>
+  <data name="ShortcutEdgeDigitsFixed" xml:space="preserve">
+    <value>1–9</value>
+  </data>
+  <data name="ShortcutEdgeDigitsFixedTip" xml:space="preserve">
+    <value>数字は 1～9 固定。変更できるのは修飾キーだけです。</value>
+  </data>
+  <data name="SettingsOpenEdgeCapsuleShortcutAtCursor" xml:space="preserve">
+    <value>キューのショートカットをマウス位置で開く</value>
+  </data>
+  <data name="TipOpenEdgeCapsuleShortcutAtCursor" xml:space="preserve">
+    <value>オンにすると、サイドキューのショートカットで紙をマウス位置に展開します。
+オフのときは貼り付け辺または記憶した位置で開きます。</value>
+  </data>
+  <data name="ShortcutCommandHeader" xml:space="preserve">
+    <value>コマンド</value>
+  </data>
+  <data name="ShortcutKeyHeader" xml:space="preserve">
+    <value>ショートカット</value>
+  </data>
+  <data name="ShortcutStatusHeader" xml:space="preserve">
+    <value>状態</value>
+  </data>
+  <data name="ShortcutRecording" xml:space="preserve">
+    <value>キーを入力</value>
+  </data>
+  <data name="ShortcutUnassigned" xml:space="preserve">
+    <value>未設定</value>
+  </data>
+  <data name="ShortcutRestoreDefault" xml:space="preserve">
+    <value>既定に戻す</value>
+  </data>
+  <data name="ShortcutRestoreAll" xml:space="preserve">
+    <value>既定に戻す</value>
+  </data>
+  <data name="ShortcutStatusUnassigned" xml:space="preserve">
+    <value>未設定</value>
+  </data>
+  <data name="ShortcutStatusRegistered" xml:space="preserve">
+    <value>登録済み</value>
+  </data>
+  <data name="ShortcutStatusDuplicate" xml:space="preserve">
+    <value>アプリ内で重複</value>
+  </data>
+  <data name="ShortcutStatusSystemOccupied" xml:space="preserve">
+    <value>システムで使用中</value>
+  </data>
+  <data name="ShortcutStatusRegistrationFailed" xml:space="preserve">
+    <value>登録失敗</value>
+  </data>
+  <data name="ShortcutShowAll" xml:space="preserve">
+    <value>すべて表示</value>
+  </data>
+  <data name="ShortcutHideAll" xml:space="preserve">
+    <value>すべて非表示</value>
+  </data>
+  <data name="ShortcutToggleVisibility" xml:space="preserve">
+    <value>表示切替</value>
+  </data>
+  <data name="ShortcutNewTodo" xml:space="preserve">
+    <value>ToDo を新規</value>
+  </data>
+  <data name="ShortcutNewNote" xml:space="preserve">
+    <value>ノートを新規</value>
+  </data>
+  <data name="ShortcutExit" xml:space="preserve">
+    <value>終了</value>
+  </data>
+  <data name="LabsMcp" xml:space="preserve"><value>ローカル MCP インターフェース</value></data>
+  <data name="LabsMcpEnable" xml:space="preserve"><value>MCP を有効化（読み取りは常に許可）</value></data>
+  <data name="TipLabsMcpEnable" xml:space="preserve"><value>同じ PaperNook.exe の --mcp モードから、ローカル AI クライアントによる紙片の読み取りを許可します。無効にすると名前付きパイプを直ちに停止します。</value></data>
+  <data name="LabsMcpBlankWrites" xml:space="preserve"><value>空欄・追加書き込みを許可</value></data>
+  <data name="TipLabsMcpBlankWrites" xml:space="preserve"><value>紙片の新規作成、既存の ToDo 紙への項目追加、空欄への入力、ノートへの追記を許可します。既存の文字は上書きしません。</value></data>
+  <data name="LabsMcpFullWrites" xml:space="preserve"><value>完全な書き込みを許可</value></data>
+  <data name="TipLabsMcpFullWrites" xml:space="preserve"><value>既存 ToDo の文字、ノート本文、完了状態、リマインダーの変更を許可します。空欄・追加書き込み権限も含みます。</value></data>
+  <data name="LabsMcpDeletes" xml:space="preserve"><value>MCP による直接削除を許可</value></data>
+  <data name="TipLabsMcpDeletes" xml:space="preserve"><value>有効にすると、AI が紙片や ToDo を確認ダイアログなしで直接削除することを事前承認します。自動的には元に戻せないため、注意して有効にしてください。</value></data>
+  <data name="LabsMcpStatusReady" xml:space="preserve"><value>ローカル MCP は準備完了</value></data>
+  <data name="LabsMcpStatusDisabled" xml:space="preserve"><value>ローカル MCP は無効</value></data>
+  <data name="LabsMcpCopyCodex" xml:space="preserve"><value>Codex 設定をコピー</value></data>
+  <data name="LabsMcpCopyJson" xml:space="preserve"><value>JSON 設定をコピー</value></data>
+  <data name="LabsMcpCopied" xml:space="preserve"><value>コピーしました</value></data>
+  <data name="LabsMcpCopyFailed" xml:space="preserve"><value>コピーに失敗しました</value></data>
+  <data name="SettingsPlugins" xml:space="preserve">
+    <value>プラグイン</value>
+  </data>
+  <data name="PluginsCurrentProtocolFormat" xml:space="preserve">
+    <value>現在のプラグインプロトコル：{0}</value>
+  </data>
+  <data name="PluginsDescriptorVersionFormat" xml:space="preserve">
+    <value>{0} · プラグイン v{1} · プロトコル {2} · 状態 {3}</value>
+  </data>
+  <data name="PluginsPageTitle" xml:space="preserve">
+    <value>本文プラグイン</value>
+  </data>
+  <data name="PluginsIntro" xml:space="preserve">
+    <value>プラグインは現在のユーザー権限で動作します。信頼できる提供元のものだけを導入してください。</value>
+  </data>
+  <data name="PluginsMoreSettings" xml:space="preserve">
+    <value>その他の設定</value>
+  </data>
+  <data name="PluginsLessSettings" xml:space="preserve">
+    <value>設定を閉じる</value>
+  </data>
+  <data name="PluginsProtocolTooltipFormat" xml:space="preserve">
+    <value>プラグインプロトコル {0}</value>
+  </data>
+  <data name="PluginsDataRecoveryPending" xml:space="preserve">
+    <value>データを読み取れないため空の状態で実行しています。新しいデータは復旧ファイルに保存されます。</value>
+  </data>
+  <data name="PluginsDataRecoveryActive" xml:space="preserve">
+    <value>元のデータを読み取れないため、復旧データファイルを使用しています。</value>
+  </data>
+  <data name="PluginsOpenFolder" xml:space="preserve">
+    <value>フォルダーを開く</value>
+  </data>
+  <data name="PluginsLoadedCountFormat" xml:space="preserve">
+    <value>本文プラグイン {0} 件を検出</value>
+  </data>
+  <data name="PluginsLoadProblems" xml:space="preserve">
+    <value>読み込みの問題</value>
+  </data>
+  <data name="PluginsNative" xml:space="preserve">
+    <value>ネイティブ</value>
+  </data>
+  <data name="PluginsWeb" xml:space="preserve">
+    <value>Web</value>
+  </data>
+  <data name="PluginsBuiltIn" xml:space="preserve">
+    <value>内蔵</value>
+  </data>
+  <data name="PluginsWebLoading" xml:space="preserve">
+    <value>Web プラグインを読み込み中…</value>
+  </data>
+  <data name="PluginsWebNavigationFailed" xml:space="preserve">
+    <value>Web プラグインのページを読み込めませんでした</value>
+  </data>
+  <data name="PluginsWebProcessFailedFormat" xml:space="preserve">
+    <value>Web プラグインのプロセス異常：{0}</value>
+  </data>
+  <data name="PluginsMissingProviderFormat" xml:space="preserve">
+    <value>本文プラグインが見つかりません：{0}</value>
+  </data>
+  <data name="PaperBodyMenu" xml:space="preserve">
+    <value>本文の種類</value>
+  </data>
+  <data name="BodyProviderMarkdown" xml:space="preserve">
+    <value>Markdown ノート</value>
+  </data>
+  <data name="BodyProviderMarkdownDescription" xml:space="preserve">
+    <value>PaperNook 内蔵の Markdown 編集・プレビュー・画像本文です。</value>
+  </data>
+  <data name="PluginBodyFailureTitle" xml:space="preserve">
+    <value>本文プラグインを実行できません</value>
+  </data>
+  <data name="PluginBodyFailureMessageFormat" xml:space="preserve">
+    <value>{0}
+
+{1}</value>
+  </data>
+  <data name="PluginBodyRetry" xml:space="preserve">
+    <value>再試行</value>
+  </data>
+  <data name="PluginBodyUseMarkdown" xml:space="preserve">
+    <value>Markdown に戻す</value>
+  </data>
+  <data name="MenuSelectedTodoCount" xml:space="preserve"><value>{0} 件を選択中</value></data>
+  <data name="MenuCopySelectedTodos" xml:space="preserve"><value>選択項目をコピー</value></data>
+  <data name="MenuCompleteSelectedTodos" xml:space="preserve"><value>すべて完了</value></data>
+  <data name="MenuUncompleteSelectedTodos" xml:space="preserve"><value>すべて未完了に戻す</value></data>
+  <data name="MenuDeleteSelectedTodos" xml:space="preserve"><value>選択した {0} 件を削除</value></data>
+  <data name="TodoDragSelectedCount" xml:space="preserve"><value>{0} 件を選択中</value></data>
+  <data name="TodoMultiSelectToolTip" xml:space="preserve"><value>上下にドラッグして複数のタスクを選択</value></data>
+  <data name="MenuOpenLinkedPath" xml:space="preserve"><value>関連パスを開く：{0}</value></data>
+  <data name="MenuOpenLinkedPathLocation" xml:space="preserve"><value>保存場所を開く</value></data>
+  <data name="MenuUnlinkPath" xml:space="preserve"><value>パスの関連付けを解除</value></data>
+  <data name="ToolTipOpenLinkedPath" xml:space="preserve"><value>関連パスを開く：{0}</value></data>
+  <data name="ToolTipLinkedPathMissing" xml:space="preserve"><value>関連パスが見つかりません：{0}</value></data>
+  <data name="LinkedPathSingleDropMessage" xml:space="preserve"><value>1 件のタスクに関連付けられるファイルまたはフォルダーは 1 つだけです。</value></data>
+  <data name="LinkedPathDropFailureTitle" xml:space="preserve"><value>パスを関連付けできません</value></data>
+  <data name="LinkedPathDropFailureMessage" xml:space="preserve"><value>このファイルまたはフォルダーを関連付けできません：&#xA;{0}</value></data>
+  <data name="LinkedPathOpenFailureTitle" xml:space="preserve"><value>関連パスを開けません</value></data>
+  <data name="LinkedPathOpenFailureMessage" xml:space="preserve"><value>システムでこのパスを開けません：&#xA;{0}</value></data>
+  <data name="LinkedPathMissingMessage" xml:space="preserve"><value>関連付けたファイルまたはフォルダーは移動または削除されています：&#xA;{0}</value></data>
+  <data name="SettingsShowLinkedPathExtensionOnly" xml:space="preserve">
+    <value>長いタイトルがオフのとき拡張子のみ表示</value>
+  </data>
+  <data name="TipShowLinkedPathExtensionOnly" xml:space="preserve">
+    <value>有効にすると、関連紙片の長いタイトルがオフのとき、ファイルのクイック起動は拡張子のみ表示します。フォルダーと拡張子のないファイルは短い名前を表示します。</value>
+  </data>
+  <data name="SettingsDeepCapsuleGap" xml:space="preserve">
+    <value>エッジカプセルの間隔</value>
+  </data>
+  <data name="TipDeepCapsuleGap" xml:space="preserve">
+    <value>同じエッジキュー内のカプセル間の上下間隔を調整します。</value>
+  </data>
+  <data name="DeepCapsuleGapNarrow" xml:space="preserve">
+    <value>狭い</value>
+  </data>
+  <data name="DeepCapsuleGapStandard" xml:space="preserve">
+    <value>標準</value>
+  </data>
+  <data name="DeepCapsuleGapWide" xml:space="preserve">
+    <value>広い</value>
+  </data>
+  <data name="AdvancedFeatureBadgeTip" xml:space="preserve">
+    <value>詳細モードで表示される拡張機能</value>
+  </data>
+  <data name="PluginsStatusIssue" xml:space="preserve">
+    <value>プラグインに問題があります</value>
+  </data>
+  <data name="PluginsStatusStopped" xml:space="preserve">
+    <value>現在未使用</value>
+  </data>
+  <data name="PluginsStatusRunning" xml:space="preserve">
+    <value>プラグインは実行中です</value>
+  </data>
+  <data name="ShortcutPreserveLinkedPaperHiddenState" xml:space="preserve">
+    <value>関連付けた紙片の非表示状態を保持</value>
+  </data>
+  <data name="PluginInstanceLimitTitle" xml:space="preserve">
+    <value>プラグインのインスタンス上限</value>
+  </data>
+  <data name="PluginInstanceLimitMessage" xml:space="preserve">
+    <value>「{0}」で作成できる紙片は最大 {1} 個です。既存のインスタンスを削除してから作成してください。</value>
+  </data>
+  <data name="NoteCopyTextOnlyTitle" xml:space="preserve">
+    <value>テキストのみコピーしました</value>
+  </data>
+  <data name="NoteCopyTextOnlyMessage" xml:space="preserve">
+    <value>選択した画像の内容が大きすぎるため、今回はテキストのみコピーしました。</value>
+  </data>
+</root>

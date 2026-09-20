@@ -1,0 +1,534 @@
+namespace PaperTodo;
+
+internal static class EdgeCapsuleReducer
+{
+    public static EdgeCapsuleDispatchResult Reduce(
+        EdgeCapsuleModel model,
+        EdgeCapsuleIntent intent)
+    {
+        var result = intent switch
+        {
+            EdgeCapsuleIntent.AttachQueue attach => Attach(model, attach),
+            EdgeCapsuleIntent.ChangeQueuePlacement placement =>
+                UpdatePlacement(model, placement.Placement),
+            EdgeCapsuleIntent.ChangePaperForm form => ChangePaperForm(model, form),
+            EdgeCapsuleIntent.BeginRetraction => BeginRetraction(model),
+            EdgeCapsuleIntent.DetachQueue => Accept(model, DetachedModel(model)),
+            EdgeCapsuleIntent.CompleteRetraction => CompleteRetraction(model),
+            EdgeCapsuleIntent.SamplePointer pointer =>
+                SamplePointer(model, pointer.OverInteractiveSurface),
+            EdgeCapsuleIntent.ChangePreview preview =>
+                SetPreview(model, preview.Open),
+            EdgeCapsuleIntent.ChangeContextMenu menu => SetContextMenu(model, menu.Open),
+            EdgeCapsuleIntent.BeginPeerReorder => ChangePeerReorder(model, active: true),
+            EdgeCapsuleIntent.FinishPeerReorder => ChangePeerReorder(model, active: false),
+            EdgeCapsuleIntent.BeginPointer pointer => BeginPointer(model, pointer.Point),
+            EdgeCapsuleIntent.LoseCapture capture => LoseCapture(model, capture.CaptureLoss),
+            EdgeCapsuleIntent.BeginDockedReorder reorder => BeginDockedReorder(model, reorder),
+            EdgeCapsuleIntent.MoveDockedReorder reorder => MoveDockedReorder(model, reorder),
+            EdgeCapsuleIntent.MoveDragPointer pointer => UpdateDragPointer(model, pointer.Point),
+            EdgeCapsuleIntent.ChangePreviewIndex preview =>
+                UpdatePreviewIndex(model, preview.Index),
+            EdgeCapsuleIntent.BeginFloatingTransfer transfer =>
+                BeginFloatingTransfer(model, transfer.Point),
+            EdgeCapsuleIntent.BeginFloatingReorder => BeginFloatingReorder(model),
+            EdgeCapsuleIntent.BeginDockingHandoff => BeginDockingHandoff(model),
+            EdgeCapsuleIntent.BeginDockingReveal => BeginDockingReveal(model),
+            EdgeCapsuleIntent.FinishPointer => FinishPointer(model),
+            EdgeCapsuleIntent.MarkOpenedFromEdge => Accept(model, model with
+            {
+                State = model.State with { OpenOrigin = EdgeCapsuleOpenOrigin.EdgeSlot }
+            }),
+            EdgeCapsuleIntent.ClearOpenOrigin => Accept(model, model with
+            {
+                State = model.State with { OpenOrigin = EdgeCapsuleOpenOrigin.Normal }
+            }),
+            EdgeCapsuleIntent.Reset => Accept(model, EdgeCapsuleModel.Initial),
+            _ => Reject(model, $"Unknown edge-capsule intent {intent.GetType().Name}.")
+        };
+
+        if (result.Accepted && !HasStructuralInvariants(result.Model))
+        {
+            return Reject(
+                model,
+                $"Edge-capsule intent {intent.GetType().Name} violated a structural invariant.");
+        }
+        return result;
+    }
+
+    private static EdgeCapsuleDispatchResult Attach(
+        EdgeCapsuleModel model,
+        EdgeCapsuleIntent.AttachQueue intent)
+    {
+        var placement = intent.Placement.Normalize();
+        if (!placement.IsPlaced)
+        {
+            return Reject(model, "Attaching an edge capsule requires a queue placement.");
+        }
+
+        var expanded = intent.PaperForm == EdgeCapsulePaperForm.Expanded;
+        var slot = intent.Retracted
+            ? expanded
+                ? EdgeCapsuleSlotState.RetractedExpanded
+                : EdgeCapsuleSlotState.RetractedCollapsed
+            : expanded
+                ? EdgeCapsuleSlotState.ExpandedReserved
+                : EdgeCapsuleSlotState.CollapsedDocked;
+        var visual = !intent.Retracted && expanded
+            ? EdgeCapsuleVisualState.Active
+            : EdgeCapsuleVisualState.Resting;
+        return Accept(model, model with
+        {
+            State = model.State with { Slot = slot, Visual = visual },
+            Placement = placement,
+            DockedDragTopDipOverride = null
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult UpdatePlacement(
+        EdgeCapsuleModel model,
+        EdgeCapsulePlacement placement)
+    {
+        if (model.State.Slot == EdgeCapsuleSlotState.None)
+        {
+            return Reject(model, "A detached edge capsule cannot receive a queue placement.");
+        }
+        placement = placement.Normalize();
+        return placement.IsPlaced
+            ? Accept(model, model with { Placement = placement })
+            : Reject(model, "A queue placement must be valid.");
+    }
+
+    private static EdgeCapsuleDispatchResult ChangePaperForm(
+        EdgeCapsuleModel model,
+        EdgeCapsuleIntent.ChangePaperForm intent)
+    {
+        if (model.State.Slot == EdgeCapsuleSlotState.None)
+        {
+            return Unchanged(model);
+        }
+
+        var expanded = intent.PaperForm == EdgeCapsulePaperForm.Expanded;
+        var retracted = model.State.Slot is
+            EdgeCapsuleSlotState.RetractedCollapsed or
+            EdgeCapsuleSlotState.RetractedExpanded;
+        if (retracted)
+        {
+            return Accept(model, model with
+            {
+                State = model.State with
+                {
+                    Slot = expanded
+                        ? EdgeCapsuleSlotState.RetractedExpanded
+                        : EdgeCapsuleSlotState.RetractedCollapsed,
+                    Visual = EdgeCapsuleVisualState.Resting
+                },
+                Preview = EdgeCapsulePreviewState.Closed
+            });
+        }
+
+        if (!expanded)
+        {
+            return Accept(model, model with
+            {
+                State = model.State with
+                {
+                    Slot = EdgeCapsuleSlotState.CollapsedDocked,
+                    Visual = EdgeCapsuleVisualState.Resting
+                }
+            });
+        }
+        if (intent.ReserveWhileExpanded)
+        {
+            return Accept(model, model with
+            {
+                State = model.State with
+                {
+                    Slot = EdgeCapsuleSlotState.ExpandedReserved,
+                    Visual = EdgeCapsuleVisualState.Active
+                }
+            });
+        }
+        return Accept(model, DetachedModel(model));
+    }
+
+    private static EdgeCapsuleDispatchResult BeginRetraction(EdgeCapsuleModel model)
+    {
+        var target = model.State.Slot switch
+        {
+            EdgeCapsuleSlotState.CollapsedDocked => EdgeCapsuleSlotState.RetractingCollapsed,
+            EdgeCapsuleSlotState.ExpandedReserved => EdgeCapsuleSlotState.RetractingExpanded,
+            _ => EdgeCapsuleSlotState.None
+        };
+        if (target == EdgeCapsuleSlotState.None)
+        {
+            return Reject(model, $"Cannot retract an edge capsule from {model.State.Slot}.");
+        }
+        return Accept(model, model with
+        {
+            State = model.State with
+            {
+                Slot = target,
+                Visual = EdgeCapsuleVisualState.Resting
+            },
+            Preview = EdgeCapsulePreviewState.Closed
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult CompleteRetraction(EdgeCapsuleModel model)
+    {
+        if (model.State.Slot is not (
+            EdgeCapsuleSlotState.RetractingCollapsed or
+            EdgeCapsuleSlotState.RetractingExpanded))
+        {
+            return Reject(model, $"Cannot complete retraction from {model.State.Slot}.");
+        }
+        return Accept(model, DetachedModel(model));
+    }
+
+    private static EdgeCapsuleDispatchResult SamplePointer(
+        EdgeCapsuleModel model,
+        bool overInteractiveSurface)
+    {
+        // Detach can precede the final hidden frame. A sample from the old applied/cover
+        // rectangle must not restore pointer ownership after the model has left the queue.
+        // Floating gestures still own an attached slot and retain their existing sampling.
+        overInteractiveSurface &= model.State.Slot != EdgeCapsuleSlotState.None &&
+            !model.PeerReorderActive;
+        var visual = model.State.Slot switch
+        {
+            EdgeCapsuleSlotState.ExpandedReserved => EdgeCapsuleVisualState.Active,
+            EdgeCapsuleSlotState.CollapsedDocked
+                when model.State.Gesture is EdgeCapsuleGestureState.Idle or EdgeCapsuleGestureState.PendingClick =>
+                model.ContextMenuOpen || overInteractiveSurface
+                    ? EdgeCapsuleVisualState.Hovered
+                    : EdgeCapsuleVisualState.Resting,
+            EdgeCapsuleSlotState.CollapsedDocked
+                when model.State.Gesture == EdgeCapsuleGestureState.DockedReordering =>
+                EdgeCapsuleVisualState.Hovered,
+            _ => EdgeCapsuleVisualState.Resting
+        };
+        return Accept(model, model with
+        {
+            State = model.State with { Visual = visual },
+            PointerOverSurface = overInteractiveSurface
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult SetPreview(
+        EdgeCapsuleModel model,
+        bool open)
+    {
+        if (!open)
+        {
+            return Accept(model, model with
+            {
+                Preview = EdgeCapsulePreviewState.Closed
+            });
+        }
+
+        var canOpen =
+            (model.State.Slot is
+                EdgeCapsuleSlotState.CollapsedDocked or
+                EdgeCapsuleSlotState.ExpandedReserved) &&
+            model.State.Gesture == EdgeCapsuleGestureState.Idle &&
+            !model.PeerReorderActive;
+        return canOpen
+            ? Accept(model, model with
+            {
+                Preview = EdgeCapsulePreviewState.Open
+            })
+            : Reject(
+                model,
+                $"Cannot open edge preview from {model.State.Slot}/{model.State.Gesture}.");
+    }
+
+    private static EdgeCapsuleDispatchResult ChangePeerReorder(
+        EdgeCapsuleModel model,
+        bool active)
+    {
+        if (active && model.State.Slot == EdgeCapsuleSlotState.None)
+        {
+            return Unchanged(model);
+        }
+
+        return Accept(model, model with { PeerReorderActive = active });
+    }
+
+    private static EdgeCapsuleDispatchResult SetContextMenu(
+        EdgeCapsuleModel model,
+        bool open)
+    {
+        var visual = open && model.State.Slot == EdgeCapsuleSlotState.CollapsedDocked
+            ? EdgeCapsuleVisualState.Hovered
+            : model.State.Visual;
+        return Accept(model, model with
+        {
+            ContextMenuOpen = open,
+            State = model.State with { Visual = visual }
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult BeginPointer(
+        EdgeCapsuleModel model,
+        DeviceScreenPoint point)
+    {
+        if (model.State.Gesture != EdgeCapsuleGestureState.Idle ||
+            model.State.Slot == EdgeCapsuleSlotState.None)
+        {
+            return Reject(model, $"Cannot begin pointer interaction from {model.State.Gesture}/{model.State.Slot}.");
+        }
+        return Accept(model, model with
+        {
+            State = model.State with { Gesture = EdgeCapsuleGestureState.PendingClick },
+            DragSession = EdgeCapsuleDragSession.Begin(point),
+            DockedDragTopDipOverride = null
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult LoseCapture(
+        EdgeCapsuleModel model,
+        EdgeCapsuleCaptureLoss captureLoss)
+    {
+        if (model.State.Gesture == EdgeCapsuleGestureState.PendingClick)
+        {
+            return FinishPointer(model);
+        }
+
+        var action = model.State.Gesture switch
+        {
+            EdgeCapsuleGestureState.DockedReordering =>
+                captureLoss.Reason ==
+                    EdgeCapsuleCaptureLossReason.AcquisitionFailed
+                    ? EdgeCapsuleCaptureAction.CancelDrag
+                    : captureLoss.LeftButtonPressed
+                    ? EdgeCapsuleCaptureAction.Recapture
+                    : EdgeCapsuleCaptureAction.CancelDrag,
+            EdgeCapsuleGestureState.FloatingTransfer or
+            EdgeCapsuleGestureState.FloatingReordering =>
+                captureLoss.Reason == EdgeCapsuleCaptureLossReason.NativeDragTransfer
+                    ? EdgeCapsuleCaptureAction.IgnoreExpectedTransfer
+                    : EdgeCapsuleCaptureAction.CancelDrag,
+            _ => EdgeCapsuleCaptureAction.None
+        };
+        return new EdgeCapsuleDispatchResult(
+            EdgeCapsuleDispatchStatus.Unchanged,
+            model,
+            CaptureAction: action);
+    }
+
+    private static EdgeCapsuleDispatchResult BeginDockedReorder(
+        EdgeCapsuleModel model,
+        EdgeCapsuleIntent.BeginDockedReorder intent)
+    {
+        if (model.State.Gesture != EdgeCapsuleGestureState.PendingClick ||
+            model.DragSession is not { } session)
+        {
+            return Reject(model, "Docked reorder requires a pending pointer interaction.");
+        }
+        session = session with
+        {
+            LastScreenPosition = intent.Point,
+            StartMonitorDeviceName = intent.StartMonitorDeviceName,
+            DockedPointerOffsetY = intent.PointerOffsetY,
+            PreviewIndex = -1
+        };
+        return Accept(model, model with
+        {
+            State = model.State with
+            {
+                Gesture = EdgeCapsuleGestureState.DockedReordering,
+                Visual = model.State.Visual == EdgeCapsuleVisualState.Active
+                    ? EdgeCapsuleVisualState.Active
+                    : EdgeCapsuleVisualState.Hovered
+            },
+            Preview = EdgeCapsulePreviewState.Closed,
+            DragSession = session,
+            DockedDragTopDipOverride = intent.TopDip
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult MoveDockedReorder(
+        EdgeCapsuleModel model,
+        EdgeCapsuleIntent.MoveDockedReorder intent)
+    {
+        if (model.State.Gesture != EdgeCapsuleGestureState.DockedReordering ||
+            model.DragSession is not { } session)
+        {
+            return Reject(model, "Docked reorder movement requires a docked reorder session.");
+        }
+        return Accept(model, model with
+        {
+            DragSession = session with { LastScreenPosition = intent.Point },
+            DockedDragTopDipOverride = intent.TopDip
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult UpdateDragPointer(
+        EdgeCapsuleModel model,
+        DeviceScreenPoint point)
+    {
+        if (model.DragSession is not { } session ||
+            model.State.Gesture is not (
+                EdgeCapsuleGestureState.DockedReordering or
+                EdgeCapsuleGestureState.FloatingTransfer or
+                EdgeCapsuleGestureState.FloatingReordering))
+        {
+            return Reject(model, "Drag pointer update requires an active reorder session.");
+        }
+        return Accept(model, model with
+        {
+            DragSession = session with { LastScreenPosition = point }
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult UpdatePreviewIndex(
+        EdgeCapsuleModel model,
+        int index)
+    {
+        if (model.DragSession is not { } session ||
+            model.State.Gesture is not (
+                EdgeCapsuleGestureState.DockedReordering or
+                EdgeCapsuleGestureState.FloatingReordering))
+        {
+            return Reject(model, "Preview index requires an active reorder session.");
+        }
+        return Accept(model, model with
+        {
+            DragSession = session with { PreviewIndex = index }
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult BeginFloatingTransfer(
+        EdgeCapsuleModel model,
+        DeviceScreenPoint point)
+    {
+        if (model.State.Gesture != EdgeCapsuleGestureState.DockedReordering ||
+            model.DragSession is not { } session)
+        {
+            return Reject(model, "Floating transfer requires a docked reorder session.");
+        }
+        // The docked HWND remains composited while the floating HWND is created. Preserve its last
+        // drag position until FinishPointer clears the session, so suppression cannot first snap it.
+        return Accept(model, model with
+        {
+            State = model.State with { Gesture = EdgeCapsuleGestureState.FloatingTransfer },
+            DragSession = session with { LastScreenPosition = point }
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult BeginFloatingReorder(EdgeCapsuleModel model)
+    {
+        if (model.State.Gesture != EdgeCapsuleGestureState.FloatingTransfer ||
+            model.DragSession == null)
+        {
+            return Reject(model, "Floating reorder requires a floating transfer session.");
+        }
+        return Accept(model, model with
+        {
+            State = model.State with { Gesture = EdgeCapsuleGestureState.FloatingReordering }
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult BeginDockingHandoff(EdgeCapsuleModel model)
+    {
+        if (model.State.Gesture != EdgeCapsuleGestureState.Idle ||
+            model.DragSession != null ||
+            model.State.Slot == EdgeCapsuleSlotState.None)
+        {
+            return Reject(model, "Docking hand-off requires a completed floating pointer interaction.");
+        }
+        return Accept(model, model with
+        {
+            State = model.State with { Gesture = EdgeCapsuleGestureState.DockingHandoff },
+            DockedDragTopDipOverride = null
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult BeginDockingReveal(EdgeCapsuleModel model)
+    {
+        if (model.State.Gesture != EdgeCapsuleGestureState.DockingHandoff ||
+            model.DragSession != null ||
+            model.State.Slot == EdgeCapsuleSlotState.None)
+        {
+            return Reject(model, "Docking reveal requires an attached hand-off without pointer input.");
+        }
+        return Accept(model, model with
+        {
+            State = model.State with { Gesture = EdgeCapsuleGestureState.DockingReveal }
+        });
+    }
+
+    private static EdgeCapsuleDispatchResult FinishPointer(EdgeCapsuleModel model) =>
+        Accept(model, model with
+        {
+            State = model.State with { Gesture = EdgeCapsuleGestureState.Idle },
+            DragSession = null,
+            DockedDragTopDipOverride = null
+        });
+
+    private static EdgeCapsuleModel DetachedModel(EdgeCapsuleModel model) => model with
+    {
+        State = model.State with
+        {
+            Slot = EdgeCapsuleSlotState.None,
+            Visual = EdgeCapsuleVisualState.Resting,
+            Gesture = EdgeCapsuleGestureState.Idle
+        },
+        Placement = EdgeCapsulePlacement.None,
+        DragSession = null,
+        ContextMenuOpen = false,
+        PeerReorderActive = false,
+        Preview = EdgeCapsulePreviewState.Closed,
+        PointerOverSurface = false,
+        DockedDragTopDipOverride = null
+    };
+
+    private static bool HasStructuralInvariants(EdgeCapsuleModel model)
+    {
+        var attached = model.State.Slot != EdgeCapsuleSlotState.None;
+        var hasPointerSession = model.State.Gesture is
+            EdgeCapsuleGestureState.PendingClick or
+            EdgeCapsuleGestureState.DockedReordering or
+            EdgeCapsuleGestureState.FloatingTransfer or
+            EdgeCapsuleGestureState.FloatingReordering;
+        var previewAllowed =
+            (model.State.Slot is
+                EdgeCapsuleSlotState.CollapsedDocked or
+                EdgeCapsuleSlotState.ExpandedReserved) &&
+            (model.State.Gesture is
+                EdgeCapsuleGestureState.Idle or
+                EdgeCapsuleGestureState.PendingClick) &&
+            !model.PeerReorderActive;
+        return attached == model.Placement.IsPlaced &&
+            (attached || !model.PeerReorderActive) &&
+            (attached || !model.PointerOverSurface) &&
+            (hasPointerSession == (model.DragSession != null)) &&
+            (model.Preview != EdgeCapsulePreviewState.Open || previewAllowed) &&
+            (model.State.Slot is not (
+                EdgeCapsuleSlotState.RetractedCollapsed or
+                EdgeCapsuleSlotState.RetractedExpanded or
+                EdgeCapsuleSlotState.RetractingCollapsed or
+                EdgeCapsuleSlotState.RetractingExpanded) ||
+                model.State.Visual == EdgeCapsuleVisualState.Resting) &&
+            (model.State.Gesture is not (
+                EdgeCapsuleGestureState.DockedReordering or
+                EdgeCapsuleGestureState.FloatingTransfer or
+                EdgeCapsuleGestureState.FloatingReordering or
+                EdgeCapsuleGestureState.DockingHandoff or
+                EdgeCapsuleGestureState.DockingReveal) || attached);
+    }
+
+    private static EdgeCapsuleDispatchResult Accept(
+        EdgeCapsuleModel previous,
+        EdgeCapsuleModel next) =>
+        next == previous
+            ? Unchanged(previous)
+            : new EdgeCapsuleDispatchResult(EdgeCapsuleDispatchStatus.Applied, next);
+
+    private static EdgeCapsuleDispatchResult Unchanged(EdgeCapsuleModel model) =>
+        new(EdgeCapsuleDispatchStatus.Unchanged, model);
+
+    private static EdgeCapsuleDispatchResult Reject(EdgeCapsuleModel model, string error) =>
+        new(EdgeCapsuleDispatchStatus.Rejected, model, error);
+}

@@ -1,0 +1,3644 @@
+using System.Diagnostics;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Text.RegularExpressions;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Interop;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Effects;
+using Brush = System.Windows.Media.Brush;
+using Brushes = System.Windows.Media.Brushes;
+using Button = System.Windows.Controls.Button;
+using CheckBox = System.Windows.Controls.CheckBox;
+using Color = System.Windows.Media.Color;
+using ContextMenu = System.Windows.Controls.ContextMenu;
+using Control = System.Windows.Controls.Control;
+using Cursor = System.Windows.Input.Cursor;
+using Cursors = System.Windows.Input.Cursors;
+using FontFamily = System.Windows.Media.FontFamily;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using MenuItem = System.Windows.Controls.MenuItem;
+using MessageBox = System.Windows.MessageBox;
+using Orientation = System.Windows.Controls.Orientation;
+using Point = System.Windows.Point;
+using Separator = System.Windows.Controls.Separator;
+using SolidColorBrush = System.Windows.Media.SolidColorBrush;
+using TextBox = System.Windows.Controls.TextBox;
+using VerticalAlignment = System.Windows.VerticalAlignment;
+using WpfMenuItem = System.Windows.Controls.MenuItem;
+using WpfPath = System.Windows.Shapes.Path;
+using PaperTodo.Plugin;
+
+namespace PaperTodo;
+
+public sealed partial class PaperWindow : Window
+{
+    [GeneratedRegex(@"^\s*[-*+]\s+\[(?: |x|X)\]\s*")]
+    private static partial Regex TodoCheckboxCleanRegex();
+
+    [GeneratedRegex(@"^\s*[-*+]\s+")]
+    private static partial Regex TodoBulletCleanRegex();
+
+    [GeneratedRegex(@"^\s*\d+[\.)、．]\s*")]
+    private static partial Regex TodoNumberCleanRegex();
+
+    [GeneratedRegex(@"^\s*[☐☑✓✔]\s*")]
+    private static partial Regex TodoGlyphCleanRegex();
+    private readonly PaperData _paper;
+    private readonly AppController _controller;
+    private bool _isShellBuilt;
+
+    private Grid _windowHost = null!;
+    private PaperChromeBorder _paperChrome = null!;
+    private readonly Grid _containerGrid = new();
+    private readonly Grid _shell = new();
+    private readonly ScaleTransform _shellScale = new(1.0, 1.0);
+    private Canvas? _dragLayer;
+    private StackPanel? _todoPanel;
+    private Button? _paperIconButton;
+    private Button? _newTodoButton;
+    private Button? _newNoteButton;
+    private Button? _openMarkdownButton;
+    private Grid? _topBar;
+    private Border? _topBarHost;
+    private Grid? _topBarTitleArea;
+    private Border? _topBarTitleHost;
+    private StackPanel? _topBarButtonsHost;
+    private StackPanel? _topBarActionButtonsHost;
+    private TextBlock? _titleText;
+    private TextBox? _titleEditBox;
+    private TextBlock? _textZoomIndicator;
+    private Border? _capsuleLeftArea;
+    private Border? _activeDropRow;
+    private Border? _dropIndicatorLine;
+    private Border? _appendArea;
+    private Border? _linkedPaperDropRow;
+    // Tracks only the hidden owner that PaperTodo applies for window-switcher hiding.
+    private bool _windowSwitcherHiddenOwnerApplied;
+    private IntPtr _windowSwitcherHiddenOwner;
+    private string? _pendingFocusItemId;
+    private readonly Dictionary<string, TodoTextBox> _todoEditors = new();
+    private readonly List<Border> _todoRows = new();
+    private TodoDragState? _todoDrag;
+    private readonly List<WeakReference<ContextMenu>> _themedContextMenus = new();
+    private bool _paperContextMenuOpening;
+    private int _paperContextMenuOpeningVersion;
+    private bool _paperContextMenuRefreshPending;
+    private readonly List<List<PaperItem>> _undoStack = new();
+    private readonly Dictionary<string, Dictionary<string, Action>> _linkedPaperTitleRefreshers =
+        new(StringComparer.Ordinal);
+    private bool _updatingTopBarResponsiveLayout;
+    private readonly List<List<PaperItem>> _redoStack = new();
+    private const int MaxUndoDepth = 100;
+    private string? _activeOriginalItemId;
+    private string? _activeOriginalText;
+    private bool _suppressTodoBackspaceUntilKeyUp;
+    private Button? _closeButton;
+    private Grid _capsuleShell = null!;
+    private Grid? _capsuleOpacityHost;
+    private EdgeCapsuleHost? _edgeCapsuleHost;
+    // Cross-edge dragging owns a separate top-level window. The docked slot host never changes
+    // into a floating pill, so its edge columns/corners cannot leak across a drag transition.
+    private EdgeCapsuleDragWindow? _deepCapsuleFloatingDragHost;
+    private IntPtr _mainWindowFullscreenAvoidanceWindow;
+    private IntPtr _deepCapsuleFloatingFullscreenAvoidanceWindow;
+    private DeepCapsuleContextMenuSession _deepCapsuleContextMenuSession = null!;
+    private Border? _capsuleCloseArea;
+    private TextBlock? _capsuleIconText;
+    private TextBlock? _capsuleCloseGlyph;
+    private TranslateTransform? _capsuleCloseGlyphOffset;
+    private TextBlock _capsuleLabelText = null!;
+    private bool _suppressGeometrySave;
+    private int _collapseTransitionGeneration;
+    private double _startTransitionWidth;
+    private double _startTransitionHeight;
+    private double _targetTransitionWidth;
+    private double _targetTransitionHeight;
+    private double _transitionBaseWidth;
+    private double _transitionBaseHeight;
+    private bool _isEditingTitle;
+    private bool _suppressTitleEditFromCurrentClick;
+    private Rect? _snappedPresentationBoundsForRestore;
+    private bool _collapsedFromMaximized;
+    private int _themeAnimationGeneration;
+    private int _clearDoneGeneration;
+    private int _todoRowsGeneration;
+    private const double DeepCapsuleExpandedEdgeInset = EdgeCapsuleLayout.ExpandedEdgeInset;
+    private const double DeepCapsuleTopMargin = EdgeCapsuleLayout.TopMargin;
+    private double DeepCapsuleGap => _controller.DeepCapsuleGap;
+    private const double WindowChromeMargin = EdgeCapsuleLayout.WindowChromeMargin;
+    private const double WindowChromeInset = WindowChromeMargin * 2;
+    private const double CapsuleBodyHeight =
+        PaperLayoutDefaults.CapsuleHeight - WindowChromeInset;
+    // Grow top bar with overall font scale, but only half as much as full FitChrome (shell zoom).
+    private static double TitleBarHeight
+    {
+        get
+        {
+            const double normal = PaperLayoutDefaults.TopBarHeight;
+            var scale = AppTypography.ScaleFactor;
+            if (scale <= 1.0)
+            {
+                return normal;
+            }
+
+            var fullScaled = Math.Ceiling(normal * scale);
+            return normal + (fullScaled - normal) * 0.5;
+        }
+    }
+    private const int CollapseShellFadeMilliseconds = 70;
+    private const int CollapseResizeMilliseconds = 150;
+    private const int ExpandAnimationMilliseconds = 220;
+    // Expand cross-fade: the capsule pill fades out first, then the paper shell fades in after it.
+    private const int ExpandCapsuleFadeOutMilliseconds = 80;
+    private const int ExpandShellFadeInMilliseconds = 140;
+    private const double ExpandedChromeCornerRadius = RadiusShell;
+    private const double CapsuleChromeCornerRadius = EdgeCapsuleLayout.CornerRadius; // 胶囊圆角，自成一套，不纳入圆角阶梯
+    private const double CapsuleInnerCornerRadius = EdgeCapsuleLayout.CornerRadius;   // 左区 / 关闭按钮的内圆角，与药丸外圆角同档
+
+    // 胶囊态内部度量。布局（leftStack/标签）与宽度计算（CapsuleShellWidth）共用同一组值，
+    // 否则二者不一致会让壳体与内容错位。整体偏紧凑，减少图标/文字四周的死白。
+    private const double CapsuleNormalMinWidth = 76;
+    private const double CapsuleLeftPadding = 6;
+    private const double CapsuleIconGap = 4;
+    private const double CapsuleCloseWidth = EdgeCapsuleLayout.CapsuleCloseWidth;
+    private const double CapsuleNormalCloseWidth = 21;
+    private const double CapsuleRightPadding = 6;
+    private double CapsuleIconFontSize => AppTypography.Scale(13);
+    private double CapsuleLabelFontSize => VisualTextSizes.FontSize(12, _controller.State.CapsuleTextSize);
+    private FontFamily CapsuleLabelFontFamily =>
+        AppTypography.FontFamilyFor(content: false, bold: _controller.State.CapsuleTextBold);
+    private FontWeight CapsuleLabelFontWeight =>
+        AppTypography.FontWeightFor(_controller.State.CapsuleTextBold);
+    private double TitleFontSize => VisualTextSizes.FontSize(12, _controller.State.TitleTextSize);
+    private FontFamily TitleFontFamily =>
+        AppTypography.FontFamilyForTitle(_controller.State.TitleTextBold);
+    private FontWeight TitleFontWeight =>
+        AppTypography.FontWeightFor(_controller.State.TitleTextBold);
+    private double TitleLineHeight => Math.Ceiling(TitleFontSize + 2);
+    private const double TopBarCollisionGap = 2.0;
+    private const double TitleBarDragThreshold = 1.0;
+    private const double CapsuleCloseGlyphNormalOffset = -1;
+    private const double DeepCapsuleSlotOutlineThickness =
+        EdgeCapsuleLayout.OutlineThickness;
+    private const double DeepCapsuleSlotOutlineOverlap =
+        EdgeCapsuleLayout.OutlineOverlap;
+    private const double DeepCapsuleReorderDragExtraThreshold = 4;
+    private const double DeepCapsuleCrossQueueDragUnlockDistance = 56;
+    private const double DeepCapsuleCrossQueueDragScaleFrom = 0.97;
+    private const int DeepCapsuleCrossQueueDragMorphMilliseconds = 90;
+    private const int DeepCapsuleDockingHandoffMilliseconds = 160;
+    private const int DeepCapsuleDockingRevealMilliseconds = 80;
+    // 圆角阶梯：所有元素只从这四档取值，避免散落的随手圆角。
+    // 小元素（勾选框）/ 控件（按钮、徽标、行）/ 块（菜单、面板）/ 外壳（纸片、顶栏）。
+    private const double RadiusSmall = 4;
+    private const double RadiusControl = 8;
+    private const double RadiusBlock = 12;
+    private const double RadiusShell = 16;
+    private static readonly object NoteRenderTraceLock = new();
+
+    public bool IsDeepCapsulePlaced => _paper.IsCollapsed && HasDeepCapsuleSlotPlacement;
+    internal bool IsShellBuilt => _isShellBuilt;
+    public bool IsDeepCapsuleSlotVisible => _edgeCapsuleHost?.IsVisible == true;
+    public bool HasVisibleSurface =>
+        (IsVisible && WindowState != WindowState.Minimized) ||
+        IsDeepCapsuleSlotVisible ||
+        HasExperimentalTetherCapsuleSurface;
+    public bool HasExpandedPaperSurface =>
+        IsVisible &&
+        WindowState != WindowState.Minimized &&
+        !_paper.IsCollapsed;
+    public bool IsCollapseAllRetracted => IsDeepCapsuleRetractedIntoMaster;
+    public bool HasExpandedDeepCapsuleSlotReservation => EdgeCapsuleSlot is
+        EdgeCapsuleSlotState.ExpandedReserved or
+        EdgeCapsuleSlotState.RetractedExpanded or
+        EdgeCapsuleSlotState.RetractingExpanded;
+    internal bool IsDeepCapsuleLeavingQueue => IsDeepCapsuleSlotRetracting;
+    public bool OccupiesDeepCapsuleSlot => _paper.IsVisible && HasDeepCapsuleSlotPlacement;
+    // The short reveal is the commit boundary of the same cross-HWND drag transaction. Keep
+    // queue/display rearrangement deferred until the verified docked surface owns presentation.
+    public bool IsDeepCapsuleReorderDragInProgress =>
+        IsDeepCapsuleReordering || IsDeepCapsuleDockingReveal;
+    public bool SuppressGeometrySave => _suppressGeometrySave;
+    internal string PaperId => _paper.Id;
+    // Ordinary collapsed capsules are the main PaperWindow and should still save X/Y.
+    // Deep capsules use the slot-host window for docked geometry, so the hidden/parked
+    // main window must not overwrite ordinary paper geometry.
+    public bool UsesNonPaperGeometry => _paper.IsCollapsed && HasDeepCapsuleSlotPlacement;
+    public bool ShouldSaveDeepCapsuleExpandedGeometry => ExpandedFromDeepCapsuleEdge && !_paper.IsCollapsed && _paper.IsVisible;
+    public double DesiredCapsuleWindowWidth => CapsuleWindowWidth();
+    public double DeepCapsuleRestingVisibleWidth => HoldsDeepCapsuleSlotWhileExpanded
+        ? ExpandedDeepCapsuleVisibleWidth()
+        : DeepCapsuleVisibleWidth();
+
+    private enum TodoFocusPlacement
+    {
+        End,
+        Start
+    }
+
+    private void ClearCapsuleInteractionKeyboardFocus()
+    {
+        WindowNative.ClearCurrentThreadKeyboardFocus();
+        Dispatcher.BeginInvoke(
+            (Action)WindowNative.ClearCurrentThreadKeyboardFocus,
+            System.Windows.Threading.DispatcherPriority.Background);
+    }
+
+    private sealed class TodoDragState
+    {
+        public TodoDragState(
+            string itemId,
+            Border sourceRow,
+            FrameworkElement handle,
+            Point startPoint,
+            Point mouseOffsetInRow)
+        {
+            ItemId = itemId;
+            SourceRow = sourceRow;
+            Handle = handle;
+            StartPoint = startPoint;
+            MouseOffsetInRow = mouseOffsetInRow;
+        }
+
+        public string ItemId { get; }
+        public Border SourceRow { get; }
+        public FrameworkElement Handle { get; }
+        public Point StartPoint { get; }
+        public bool IsDragging { get; set; }
+        public string? TargetId { get; set; }
+        public DropPlacement TargetPlacement { get; set; } = DropPlacement.After;
+        public bool DropAtEnd { get; set; }
+
+        public Border? Ghost { get; set; }
+        public Point MouseOffsetInRow { get; }
+        public double RestingOpacity { get; set; } = 1.0;
+    }
+
+    private enum DropPlacement
+    {
+        Before,
+        After
+    }
+
+    private static Brush PaperBrush => Theme.PaperBrush;
+    private static Brush PaperBorderBrush => Theme.PaperBorderBrush;
+    private static Brush TextBrush => Theme.TextBrush;
+    private static Brush WeakTextBrush => Theme.WeakTextBrush;
+    private static Brush BrightWeakTextBrush => Theme.BrightWeakTextBrush;
+    private static Brush HoverBrush => Theme.HoverBrush;
+    private static Brush MenuHoverBrush => Theme.HoverBrush;
+
+    // 以下半透明叠加色全部从当前主题的 Tint / Danger 基色派生，
+    // 切换配色族（暖纸 / 墨 / 林 / 霞）时自动跟随，无需各自维护 Light/Dark 对。
+    private static Brush DropIndicatorBgBrush => Theme.Tint(12);
+    private static Brush DropIndicatorBrush => Theme.Tint(180);
+    private static Brush AppendDropBrush => Theme.Tint(34);
+    private static Brush AppendBorderBrush => Theme.Tint(45);
+    private static Brush AppendBgBrush => Theme.Tint(12);
+    private static Brush AppendHoverBgBrush => Theme.Tint(26);
+    private static Brush PaperLinkTargetBgBrush => Theme.Tint((byte)(Theme.IsDark ? 36 : 28));
+    private static Brush PaperLinkTargetBorderBrush => Theme.Tint(150);
+    private static Brush LinkedPaperNormalBgBrush => Theme.Tint((byte)(Theme.IsDark ? 28 : 18));
+    private static Brush LinkedPaperLightBgBrush => Theme.Tint((byte)(Theme.IsDark ? 48 : 34));
+    private static Brush LinkedPaperMediumBgBrush => Theme.Tint((byte)(Theme.IsDark ? 78 : 58));
+    private static Brush LinkedPaperActiveTextBrush => Theme.TextBrush;
+
+    private static Brush CheckBoxBorderBrush => Theme.CheckBoxBorderBrush;
+
+    private static Brush TrashBgBrush => Theme.Danger((byte)(Theme.IsDark ? 16 : 12));
+    private static Brush TrashBorderBrush => Theme.Danger(50);
+    private static Brush TrashTextBrush => Theme.DangerBrush;
+    private static Brush TrashHoverBgBrush => Theme.Danger((byte)(Theme.IsDark ? 32 : 26));
+    private static Brush TrashHoverBorderBrush => Theme.DangerBrush;
+
+    private static Brush TitleBarBrush => Theme.Tint((byte)(Theme.IsDark ? 18 : 12));
+    private static Brush TitleBarDividerBrush => Theme.Tint((byte)(Theme.IsDark ? 34 : 28));
+    private const string PinOutlineHeadPathData = "M 7.5,4.25 H 16.5 V 5.75 H 15.5 V 12.05 L 17.6,14.15 V 15.35 H 6.4 V 14.15 L 8.5,12.05 V 5.75 H 7.5 Z";
+    private const string PinNeedlePathData = "M 10.85,15.35 H 13.15 V 22.1 L 12,23.25 L 10.85,22.1 Z";
+    private const int TodoMoveAnimationMilliseconds = 150;
+
+    // Static helpers can initialize PaperWindow on a worker thread during startup.
+    // Keep dispatcher-owned menu resources lazy and shared only by their creating thread.
+    // ThreadStatic fields must not have initializers: each UI thread fills its own cache.
+    [ThreadStatic]
+    private static ControlTemplate? _sharedContextMenuTemplate;
+    [ThreadStatic]
+    private static Style? _sharedCompactMenuItemStyle;
+    [ThreadStatic]
+    private static double _sharedCompactMenuItemStyleScale;
+
+    private static ControlTemplate SharedContextMenuTemplate =>
+        _sharedContextMenuTemplate ??= BuildContextMenuTemplate();
+    private static Style SharedCompactMenuItemStyle
+    {
+        get
+        {
+            var scale = AppTypography.ScaleFactor;
+            if (_sharedCompactMenuItemStyle == null || _sharedCompactMenuItemStyleScale != scale)
+            {
+                // Sealed styles cannot be edited. Replace the thread's cache when its baked-in
+                // glyph metrics change; live menus replace their resource during typography refresh.
+                _sharedCompactMenuItemStyle = BuildCompactMenuItemStyle();
+                _sharedCompactMenuItemStyleScale = scale;
+            }
+            return _sharedCompactMenuItemStyle;
+        }
+    }
+    private Style? _todoCheckBoxStyle;
+    private double _todoCheckBoxStyleScale = double.NaN;
+
+    private static ControlTemplate BuildContextMenuTemplate()
+    {
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.BorderBrushProperty, new TemplateBindingExtension(Control.BorderBrushProperty));
+        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(RadiusBlock));
+        border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
+
+        var presenter = new FrameworkElementFactory(typeof(ItemsPresenter));
+        border.AppendChild(presenter);
+
+        return new ControlTemplate(typeof(ContextMenu))
+        {
+            VisualTree = border
+        };
+    }
+
+    private static Style BuildCompactMenuItemStyle()
+    {
+        var style = new Style(typeof(MenuItem));
+
+        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(8, 4, 10, 4)));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("TextBrushKey")));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
+        style.Setters.Add(new Setter(FrameworkElement.MinWidthProperty, 0.0));
+
+        var rootGrid = new FrameworkElementFactory(typeof(Grid));
+
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.Name = "Bd";
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(RadiusControl));
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
+
+        var itemGrid = new FrameworkElementFactory(typeof(Grid));
+
+        var checkColumn = new FrameworkElementFactory(typeof(ColumnDefinition));
+        checkColumn.SetValue(ColumnDefinition.WidthProperty, GridLength.Auto);
+        itemGrid.AppendChild(checkColumn);
+
+        var contentColumn = new FrameworkElementFactory(typeof(ColumnDefinition));
+        contentColumn.SetValue(
+            ColumnDefinition.WidthProperty,
+            new GridLength(1, GridUnitType.Star));
+        itemGrid.AppendChild(contentColumn);
+
+        var arrowColumn = new FrameworkElementFactory(typeof(ColumnDefinition));
+        arrowColumn.SetValue(ColumnDefinition.WidthProperty, GridLength.Auto);
+        itemGrid.AppendChild(arrowColumn);
+
+        var checkHost = new FrameworkElementFactory(typeof(Border));
+        checkHost.Name = "CheckHost";
+        checkHost.SetValue(FrameworkElement.WidthProperty, AppTypography.Scale(13));
+        checkHost.SetValue(FrameworkElement.MarginProperty, new Thickness(0, 0, 6, 0));
+        checkHost.SetValue(UIElement.VisibilityProperty, Visibility.Collapsed);
+        checkHost.SetValue(Grid.ColumnProperty, 0);
+
+        var checkMark = new FrameworkElementFactory(typeof(TextBlock));
+        checkMark.Name = "CheckMark";
+        checkMark.SetValue(TextBlock.TextProperty, "✓");
+        checkMark.SetValue(TextBlock.FontSizeProperty, AppTypography.Scale(11));
+        checkMark.SetValue(UIElement.OpacityProperty, 0.0);
+        checkMark.SetValue(
+            FrameworkElement.HorizontalAlignmentProperty,
+            HorizontalAlignment.Center);
+        checkMark.SetValue(
+            FrameworkElement.VerticalAlignmentProperty,
+            VerticalAlignment.Center);
+        checkHost.AppendChild(checkMark);
+        itemGrid.AppendChild(checkHost);
+
+        var content = new FrameworkElementFactory(typeof(ContentPresenter));
+        content.SetValue(ContentPresenter.ContentSourceProperty, "Header");
+        content.SetValue(ContentPresenter.RecognizesAccessKeyProperty, true);
+        content.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        content.SetValue(Grid.ColumnProperty, 1);
+        itemGrid.AppendChild(content);
+
+        var arrow = new FrameworkElementFactory(typeof(TextBlock));
+        arrow.Name = "SubMenuArrow";
+        arrow.SetValue(TextBlock.TextProperty, "›");
+        arrow.SetValue(TextBlock.FontSizeProperty, AppTypography.Scale(14));
+        arrow.SetValue(FrameworkElement.MarginProperty, new Thickness(12, 0, 0, 0));
+        arrow.SetValue(
+            FrameworkElement.VerticalAlignmentProperty,
+            VerticalAlignment.Center);
+        arrow.SetValue(UIElement.VisibilityProperty, Visibility.Collapsed);
+        arrow.SetValue(Grid.ColumnProperty, 2);
+        itemGrid.AppendChild(arrow);
+
+        border.AppendChild(itemGrid);
+        rootGrid.AppendChild(border);
+
+        var popup = new FrameworkElementFactory(typeof(Popup));
+        popup.Name = "PART_Popup";
+        popup.SetValue(
+            Popup.IsOpenProperty,
+            new TemplateBindingExtension(WpfMenuItem.IsSubmenuOpenProperty));
+        popup.SetValue(Popup.PlacementProperty, PlacementMode.Right);
+        popup.SetValue(Popup.AllowsTransparencyProperty, true);
+        popup.SetValue(Popup.FocusableProperty, false);
+        popup.SetValue(Popup.PopupAnimationProperty, PopupAnimation.Fade);
+
+        var popupBorder = new FrameworkElementFactory(typeof(Border));
+        popupBorder.SetValue(
+            Border.BackgroundProperty,
+            new DynamicResourceExtension("PaperBrushKey"));
+        popupBorder.SetValue(
+            Border.BorderBrushProperty,
+            new DynamicResourceExtension("PaperBorderBrushKey"));
+        popupBorder.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        popupBorder.SetValue(Border.CornerRadiusProperty, new CornerRadius(RadiusBlock));
+        popupBorder.SetValue(Border.PaddingProperty, new Thickness(4));
+
+        var itemsPresenter = new FrameworkElementFactory(typeof(ItemsPresenter));
+        itemsPresenter.Name = "ItemsPresenter";
+        popupBorder.AppendChild(itemsPresenter);
+        popup.AppendChild(popupBorder);
+        rootGrid.AppendChild(popup);
+
+        var template = new ControlTemplate(typeof(MenuItem))
+        {
+            VisualTree = rootGrid
+        };
+
+        var hover = new Trigger
+        {
+            Property = WpfMenuItem.IsHighlightedProperty,
+            Value = true
+        };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("HoverBrushKey"), "Bd"));
+
+        var checkable = new Trigger
+        {
+            Property = WpfMenuItem.IsCheckableProperty,
+            Value = true
+        };
+        checkable.Setters.Add(new Setter(
+            UIElement.VisibilityProperty,
+            Visibility.Visible,
+            "CheckHost"));
+
+        var isChecked = new Trigger
+        {
+            Property = WpfMenuItem.IsCheckedProperty,
+            Value = true
+        };
+        isChecked.Setters.Add(new Setter(UIElement.OpacityProperty, 1.0, "CheckMark"));
+
+        var hasItems = new Trigger
+        {
+            Property = WpfMenuItem.HasItemsProperty,
+            Value = true
+        };
+        hasItems.Setters.Add(new Setter(
+            UIElement.VisibilityProperty,
+            Visibility.Visible,
+            "SubMenuArrow"));
+
+        var disabled = new Trigger
+        {
+            Property = UIElement.IsEnabledProperty,
+            Value = false
+        };
+        disabled.Setters.Add(new Setter(UIElement.OpacityProperty, 0.72));
+
+        template.Triggers.Add(hover);
+        template.Triggers.Add(checkable);
+        template.Triggers.Add(isChecked);
+        template.Triggers.Add(hasItems);
+        template.Triggers.Add(disabled);
+
+        style.Setters.Add(new Setter(Control.TemplateProperty, template));
+        return style;
+    }
+
+    private static Style BuildIconButtonStyle()
+    {
+        var style = new Style(typeof(Button));
+        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0)));
+        style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("WeakTextBrushKey")));
+        style.Setters.Add(new Setter(Control.CursorProperty, Cursors.Hand));
+        style.Setters.Add(new Setter(Control.FontFamilyProperty, AppTypography.SymbolFontFamily));
+        style.Setters.Add(new Setter(Control.FontSizeProperty, AppTypography.Scale(13)));
+        style.Setters.Add(new Setter(Control.FocusableProperty, false));
+
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.Name = "Bd";
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(RadiusControl));
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
+
+        var content = new FrameworkElementFactory(typeof(ContentPresenter));
+        content.SetValue(ContentPresenter.ContentProperty, new TemplateBindingExtension(ContentControl.ContentProperty));
+        content.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        content.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(content);
+
+        var template = new ControlTemplate(typeof(Button))
+        {
+            VisualTree = border
+        };
+
+        var mouseOver = new Trigger
+        {
+            Property = UIElement.IsMouseOverProperty,
+            Value = true
+        };
+        mouseOver.Setters.Add(new Setter(Control.BackgroundProperty, new DynamicResourceExtension("HoverBrushKey")));
+        mouseOver.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("TextBrushKey")));
+
+        var pressed = new Trigger
+        {
+            Property = ButtonBase.IsPressedProperty,
+            Value = true
+        };
+        pressed.Setters.Add(new Setter(UIElement.OpacityProperty, 0.7));
+
+        template.Triggers.Add(mouseOver);
+        template.Triggers.Add(pressed);
+        style.Setters.Add(new Setter(Control.TemplateProperty, template));
+
+        return style;
+    }
+
+    private Style CurrentTodoCheckBoxStyle()
+    {
+        if (_todoCheckBoxStyle == null ||
+            Math.Abs(_todoCheckBoxStyleScale - AppTypography.ScaleFactor) > 0.001)
+        {
+            _todoCheckBoxStyle = BuildCustomCheckBoxStyle();
+            _todoCheckBoxStyleScale = AppTypography.ScaleFactor;
+        }
+
+        return _todoCheckBoxStyle;
+    }
+
+    private static Style BuildCustomCheckBoxStyle()
+    {
+        var style = new Style(typeof(CheckBox));
+        var checkBoxSize = AppTypography.Scale(16);
+
+        style.Setters.Add(new Setter(FrameworkElement.WidthProperty, checkBoxSize));
+        style.Setters.Add(new Setter(FrameworkElement.HeightProperty, checkBoxSize));
+        style.Setters.Add(new Setter(Control.CursorProperty, Cursors.Hand));
+        style.Setters.Add(new Setter(UIElement.FocusableProperty, false));
+        style.Setters.Add(new Setter(Control.FocusVisualStyleProperty, null));
+        style.Setters.Add(new Setter(UIElement.SnapsToDevicePixelsProperty, true));
+        style.Setters.Add(new Setter(FrameworkElement.UseLayoutRoundingProperty, true));
+
+        var grid = new FrameworkElementFactory(typeof(Grid));
+
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.Name = "CheckBorder";
+        border.SetValue(FrameworkElement.WidthProperty, checkBoxSize);
+        border.SetValue(FrameworkElement.HeightProperty, checkBoxSize);
+        border.SetValue(Border.BorderThicknessProperty, new Thickness(AppTypography.Scale(1.5)));
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(AppTypography.Scale(RadiusSmall)));
+        border.SetValue(Border.BorderBrushProperty, new DynamicResourceExtension("CheckBoxBorderBrushKey"));
+        border.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+        border.SetValue(UIElement.SnapsToDevicePixelsProperty, true);
+        grid.AppendChild(border);
+
+        var path = new FrameworkElementFactory(typeof(System.Windows.Shapes.Path));
+        path.Name = "CheckMark";
+        path.SetValue(System.Windows.Shapes.Path.DataProperty, Geometry.Parse("M 3,7.5 L 6.5,11 L 13,4"));
+        path.SetValue(System.Windows.Shapes.Path.StrokeProperty, new DynamicResourceExtension("PaperBrushKey"));
+        path.SetValue(System.Windows.Shapes.Path.StrokeThicknessProperty, 2.0);
+        path.SetValue(System.Windows.Shapes.Path.StrokeStartLineCapProperty, PenLineCap.Round);
+        path.SetValue(System.Windows.Shapes.Path.StrokeEndLineCapProperty, PenLineCap.Round);
+        path.SetValue(System.Windows.Shapes.Path.StrokeLineJoinProperty, PenLineJoin.Round);
+        path.SetValue(UIElement.VisibilityProperty, Visibility.Collapsed);
+        path.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        path.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        path.SetValue(
+            FrameworkElement.LayoutTransformProperty,
+            new ScaleTransform(AppTypography.ScaleFactor, AppTypography.ScaleFactor));
+        path.SetValue(UIElement.SnapsToDevicePixelsProperty, true);
+        grid.AppendChild(path);
+
+        var template = new ControlTemplate(typeof(CheckBox))
+        {
+            VisualTree = grid
+        };
+
+        var checkedTrigger = new Trigger
+        {
+            Property = ToggleButton.IsCheckedProperty,
+            Value = true
+        };
+        checkedTrigger.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("CheckBoxActiveBrushKey"), "CheckBorder"));
+        checkedTrigger.Setters.Add(new Setter(Border.BorderBrushProperty, Brushes.Transparent, "CheckBorder"));
+        checkedTrigger.Setters.Add(new Setter(Border.BorderThicknessProperty, new Thickness(0), "CheckBorder"));
+        checkedTrigger.Setters.Add(new Setter(UIElement.VisibilityProperty, Visibility.Visible, "CheckMark"));
+
+        var hoverTrigger = new MultiTrigger();
+        hoverTrigger.Conditions.Add(new Condition { Property = UIElement.IsMouseOverProperty, Value = true });
+        hoverTrigger.Conditions.Add(new Condition { Property = ToggleButton.IsCheckedProperty, Value = false });
+        hoverTrigger.Setters.Add(new Setter(Border.BorderBrushProperty, new DynamicResourceExtension("CheckBoxUncheckedHoverBorderBrushKey"), "CheckBorder"));
+        hoverTrigger.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("CheckBoxUncheckedHoverBgKey"), "CheckBorder"));
+
+        var hoverCheckedTrigger = new MultiTrigger();
+        hoverCheckedTrigger.Conditions.Add(new Condition { Property = UIElement.IsMouseOverProperty, Value = true });
+        hoverCheckedTrigger.Conditions.Add(new Condition { Property = ToggleButton.IsCheckedProperty, Value = true });
+        hoverCheckedTrigger.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("CheckBoxActiveHoverBrushKey"), "CheckBorder"));
+        hoverCheckedTrigger.Setters.Add(new Setter(Border.BorderBrushProperty, Brushes.Transparent, "CheckBorder"));
+        hoverCheckedTrigger.Setters.Add(new Setter(Border.BorderThicknessProperty, new Thickness(0), "CheckBorder"));
+
+        template.Triggers.Add(checkedTrigger);
+        template.Triggers.Add(hoverTrigger);
+        template.Triggers.Add(hoverCheckedTrigger);
+
+        style.Setters.Add(new Setter(Control.TemplateProperty, template));
+        return style;
+    }
+
+    public PaperWindow(
+        PaperData paper,
+        AppController controller,
+        bool deferShellConstruction = false)
+    {
+        _paper = paper;
+        _controller = controller;
+        _edgeCapsule.DiagnosticId =
+            EdgeCapsulePerformanceDiagnostics.ShortId(paper.Id);
+        _deepCapsuleContextMenuSession = new DeepCapsuleContextMenuSession(
+            controller,
+            paper.Id,
+            Dispatcher,
+            IsPointInsideDeepCapsuleOwnerSurface,
+            OnDeepCapsuleContextMenuOpenChanged);
+        InitializePaperPresentationState();
+
+        ConfigureWindow();
+        if (deferShellConstruction)
+        {
+            UpdateToolTipSetting();
+        }
+        else
+        {
+            EnsureShellBuilt();
+        }
+
+        Loaded += (_, _) =>
+        {
+            SaveGeometryIfAllowed();
+            // Finish taskbar / Alt+Tab shell registration before ShowPaper's Render-priority
+            // reveal. Reapplying it at Background priority after the fade has started makes
+            // Windows rebuild each visible paper frame, which appears as a startup flash.
+            Dispatcher.BeginInvoke(
+                (Action)ApplyDeferredStartupSystemVisibility,
+                System.Windows.Threading.DispatcherPriority.Normal);
+        };
+        LocationChanged += (_, _) => HandleWindowGeometryChanged();
+        SizeChanged += (_, _) =>
+        {
+            HandleWindowGeometryChanged();
+            UpdateTopBarResponsiveLayout();
+        };
+        DpiChanged += (_, _) => NotifyCurrentPaperBodyDpiChanged();
+        StateChanged += (_, _) =>
+        {
+            RefreshSnappedPresentation(forceApply: true);
+            if (_paper.Type == PaperTypes.Note)
+            {
+                NotifyCurrentPaperBodyVisibility(
+                    _paper.IsVisible &&
+                    !_paper.IsCollapsed &&
+                    WindowState != WindowState.Minimized &&
+                    IsVisible);
+            }
+        };
+        PreviewMouseMove += OnWindowPreviewMouseMove;
+        PreviewMouseWheel += OnWindowPreviewMouseWheel;
+        PreviewMouseLeftButtonUp += OnWindowPreviewMouseLeftButtonUp;
+        LostMouseCapture += OnLostMouseCapture;
+        PreviewKeyDown += OnWindowPreviewKeyDown;
+        PreviewKeyUp += OnWindowPreviewKeyUp;
+        SourceInitialized += (_, _) =>
+        {
+            ApplySystemVisibility(reapplyTaskbarShellState: true);
+            if (PresentationSource.FromVisual(this) is HwndSource source)
+            {
+                source.AddHook(OnWindowMessage);
+            }
+
+            ApplyExperimentalPassiveNativeState();
+            UpdateAdvancedInteractionLockVisuals();
+            RefreshEffectiveTopmost();
+        };
+        Activated += (_, _) =>
+        {
+            CancelExperimentalAutoCollapse();
+            _controller.NotifyPaperWindowActivated(this);
+            _controller.RefreshFloatingSurfaceZOrder();
+            NotifyCurrentPaperBodyActivated();
+            RefreshExperimentalOpacity();
+        };
+        Deactivated += (_, _) =>
+        {
+            var suppressAutoCollapse = HasExperimentalAutoCollapseBlocker();
+            NotifyCurrentPaperBodyDeactivated();
+            AbortAllInteractions(InteractionAbortReason.Deactivated);
+            RefreshExperimentalOpacity();
+            ScheduleExperimentalAutoCollapse(suppressAutoCollapse);
+        };
+        Closing += OnClosing;
+        Closed += (_, _) => CompletePaperWindowClose();
+
+        if (_paper.Type == PaperTypes.Note)
+        {
+            PreviewMouseLeftButtonDown += (s, e) =>
+            {
+                if (_noteBox != null && _noteBox.IsFocused)
+                {
+                    var clicked = e.OriginalSource as DependencyObject;
+                    if (!IsDescendantOf(clicked, _noteBox))
+                    {
+                        ExitNoteEditor();
+                    }
+                }
+            };
+        }
+    }
+
+    internal void EnsureShellBuilt()
+    {
+        if (_isShellBuilt || IsClosed)
+        {
+            return;
+        }
+
+        Dispatcher.VerifyAccess();
+        BuildShell();
+        _isShellBuilt = true;
+        UpdateToolTipSetting();
+        RefreshExperimentalOpacity(animate: false);
+        UpdateExperimentalFocusPresentationSettings();
+        UpdateAdvancedInteractionLockVisuals();
+        ReplayPluginRuntimePresentation();
+    }
+
+    private void HandleWindowGeometryChanged()
+    {
+        SaveGeometryIfAllowed();
+        UpdateExperimentalCapsuleMagnetDragPreview();
+        if (_mainWindowFullscreenAvoidanceWindow != _controller.FullscreenAvoidanceWindowFor(this))
+        {
+            RefreshEffectiveTopmost();
+        }
+    }
+
+    public void CloseForReal()
+    {
+        if (IsClosed)
+        {
+            return;
+        }
+
+        BeginPaperWindowClose();
+        CloseExpandedDeepCapsuleSlotHostForReal();
+
+        Close();
+    }
+
+    public void UpdateToolTipSetting()
+    {
+        ToolTipPreferences.Apply(this, _controller.State.EnableToolTips);
+        _edgeCapsuleHost?.ApplyToolTipSetting(_controller.State.EnableToolTips);
+    }
+
+    public void UpdateWindowSwitcherVisibility()
+    {
+        if (_controller.State.HidePapersFromWindowSwitcher)
+        {
+            WindowNative.ApplyWindowSwitcherVisibility(
+                this,
+                visible: false,
+                ref _windowSwitcherHiddenOwner);
+            _windowSwitcherHiddenOwnerApplied = true;
+            return;
+        }
+
+        if (_windowSwitcherHiddenOwnerApplied)
+        {
+            WindowNative.ApplyWindowSwitcherVisibility(
+                this,
+                visible: true,
+                ref _windowSwitcherHiddenOwner);
+            _windowSwitcherHiddenOwnerApplied = false;
+        }
+    }
+
+    public void UpdateTaskbarVisibility(bool reapplyShellState = false)
+    {
+        var shouldShow = ShouldShowInTaskbar();
+        if (reapplyShellState && !shouldShow && !ShowInTaskbar)
+        {
+            ShowInTaskbar = true;
+        }
+
+        ShowInTaskbar = shouldShow;
+    }
+
+    public void ApplySystemVisibility(bool reapplyTaskbarShellState = false)
+    {
+        if (_controller.State.HidePapersFromWindowSwitcher)
+        {
+            UpdateTaskbarVisibility(reapplyTaskbarShellState);
+            UpdateWindowSwitcherVisibility();
+            return;
+        }
+
+        UpdateWindowSwitcherVisibility();
+        UpdateTaskbarVisibility(reapplyTaskbarShellState);
+    }
+
+    private void ApplyDeferredStartupSystemVisibility()
+    {
+        // A cold edge activation can start its form animation before Loaded's queued work.
+        // SourceInitialized already applied switcher state; form completion owns the taskbar.
+        if (IsPaperFormTransitioning)
+        {
+            return;
+        }
+        var shouldShowInTaskbar = ShouldShowInTaskbar();
+        ApplySystemVisibility(reapplyTaskbarShellState: ShowInTaskbar != shouldShowInTaskbar || !shouldShowInTaskbar);
+    }
+
+    private bool ShouldShowInTaskbar(bool? collapsed = null)
+    {
+        return !_controller.State.HidePapersFromWindowSwitcher &&
+            !_controller.State.HidePapersFromTaskbar &&
+            !(collapsed ?? _paper.IsCollapsed);
+    }
+
+    private bool TryGetHiddenResizeHitTest(IntPtr hwnd, IntPtr lParam, out int hitTest)
+    {
+        hitTest = 0;
+        if (ResizeGripModes.Normalize(_controller.State.ResizeGripMode) != ResizeGripModes.Hidden ||
+            _paper.IsCollapsed ||
+            IsPaperFormTransitioning ||
+            WindowState != WindowState.Normal ||
+            (ResizeMode != ResizeMode.CanResize && ResizeMode != ResizeMode.CanResizeWithGrip) ||
+            !GetWindowRect(hwnd, out var bounds))
+        {
+            return false;
+        }
+
+        // WM_NCHITTEST packs signed screen coordinates into lParam. Preserve the sign so
+        // monitors to the left or above the primary display hit-test correctly.
+        var packedPosition = lParam.ToInt64();
+        var pointerX = unchecked((short)(packedPosition & 0xFFFF));
+        var pointerY = unchecked((short)((packedPosition >> 16) & 0xFFFF));
+
+        if (pointerX < bounds.Left ||
+            pointerX >= bounds.Right ||
+            pointerY < bounds.Top ||
+            pointerY >= bounds.Bottom)
+        {
+            return false;
+        }
+
+        var dpi = GetDpiForWindow(hwnd);
+        var dpiScale = dpi > 0 ? dpi / 96.0 : 1.0;
+        // Keep resize bands at the original HWND edges. Moving the top band to the
+        // mask boundary would intercept controls in the first 8 DIPs of the body.
+        if (_paperChrome is { HeaderOpacity: 0 } chrome &&
+            pointerY < bounds.Top + (int)Math.Round((chrome.Margin.Top + chrome.HeaderExtent) * dpiScale))
+        {
+            return false;
+        }
+        var resizeBorder = Math.Max(1.0, WindowChromeMargin * dpiScale);
+        var nearLeft = pointerX < bounds.Left + resizeBorder;
+        var nearRight = pointerX >= bounds.Right - resizeBorder;
+        var nearTop = pointerY < bounds.Top + resizeBorder;
+        var nearBottom = pointerY >= bounds.Bottom - resizeBorder;
+
+        if (nearTop && nearLeft)
+        {
+            hitTest = HtTopLeft;
+        }
+        else if (nearTop && nearRight)
+        {
+            hitTest = HtTopRight;
+        }
+        else if (nearBottom && nearLeft)
+        {
+            hitTest = HtBottomLeft;
+        }
+        else if (nearBottom && nearRight)
+        {
+            hitTest = HtBottomRight;
+        }
+        else if (nearLeft)
+        {
+            hitTest = HtLeft;
+        }
+        else if (nearRight)
+        {
+            hitTest = HtRight;
+        }
+        else if (nearTop)
+        {
+            hitTest = HtTop;
+        }
+        else if (nearBottom)
+        {
+            hitTest = HtBottom;
+        }
+
+        return hitTest != 0;
+    }
+
+    private IntPtr OnWindowMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WmNcHitTest && IsExperimentalPassive)
+        {
+            handled = true;
+            return new IntPtr(HtTransparent);
+        }
+
+        // Keep restore/maximize on the default system path; only native minimization is blocked.
+        if (msg == WmSysCommand && (wParam.ToInt64() & SystemCommandMask) == ScMinimize)
+        {
+            handled = true;
+            return IntPtr.Zero;
+        }
+
+        if (msg == WmNcHitTest && TryGetHiddenResizeHitTest(hwnd, lParam, out var resizeHitTest))
+        {
+            handled = true;
+            return new IntPtr(resizeHitTest);
+        }
+
+        // PreviewKeyDown needs a WPF keyboard-focus target. Note preview deliberately
+        // makes the editor non-focusable, so an active paper can receive WM_KEYDOWN
+        // without producing a routed key event. Handle Escape at the HWND boundary and
+        // reuse the same collapse path as focused editors.
+        if (msg == WmKeyDown &&
+            wParam.ToInt32() == VkEscape &&
+            Keyboard.Modifiers == ModifierKeys.None &&
+            !BodyClaimsInput(PaperBodyInputClaims.EscapeKey) &&
+            TryCollapseExpandedPaperFromEscape())
+        {
+            handled = true;
+            return IntPtr.Zero;
+        }
+
+        if (msg is WmDpiChanged or WmDisplayChange or WmSettingChange)
+        {
+            if (IsDeepCapsuleReordering || IsDeepCapsuleDockingReveal)
+            {
+                _controller.DeferDisplayMetricsRefreshUntilDeepCapsuleDragEnds();
+            }
+            else
+            {
+                _controller.ScheduleDisplayMetricsRefresh();
+            }
+        }
+
+        if (msg == WmWindowPosChanged)
+        {
+            RefreshSnappedPresentation();
+        }
+
+        if (msg == WmGetMinMaxInfo)
+        {
+            try
+            {
+                var mmi = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+                var dpi = GetDpiForWindow(hwnd);
+                var dpiScale = dpi > 0 ? dpi / 96.0 : 1.0;
+                mmi.MinTrackSize = new MutablePoint
+                {
+                    X = Math.Max(mmi.MinTrackSize.X, (int)Math.Ceiling(MinWidth * dpiScale)),
+                    Y = Math.Max(mmi.MinTrackSize.Y, (int)Math.Ceiling(MinHeight * dpiScale))
+                };
+
+                // Clamp maximize bounds to the work area so the window doesn't cover the taskbar.
+                // This hook must also preserve WPF's minimum tracking size because handled=true
+                // prevents the framework from applying MinWidth/MinHeight afterward.
+                var monitor = MonitorFromWindow(hwnd, 2);
+                if (monitor != IntPtr.Zero)
+                {
+                    var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+                    if (GetMonitorInfo(monitor, ref info))
+                    {
+                        var wa = info.WorkArea;
+                        var mon = info.Monitor;
+
+                        // If work area equals monitor (auto-hide taskbar), use full screen to avoid gap
+                        bool isAutoHide = (wa.Left == mon.Left && wa.Top == mon.Top &&
+                                           wa.Right == mon.Right && wa.Bottom == mon.Bottom);
+
+                        var rect = isAutoHide ? mon : wa;
+                        mmi.MaxSize = new MutablePoint { X = rect.Right - rect.Left, Y = rect.Bottom - rect.Top };
+                        mmi.MaxPosition = new MutablePoint { X = rect.Left - mon.Left, Y = rect.Top - mon.Top };
+                    }
+                }
+
+                Marshal.StructureToPtr(mmi, lParam, true);
+                handled = true;
+            }
+            catch
+            {
+                // Ignore malformed lParam or marshal failures; WPF's default behavior is acceptable.
+            }
+        }
+
+        return IntPtr.Zero;
+    }
+
+    // Snap-completed presentation patch:
+    // When the OS docks the window to a monitor tile (drag-to-edge or Win+arrow), make the
+    // paper fill the tile edge-to-edge: suppress the drop shadow AND collapse the 8px
+    // transparent chrome margin + corner radius. Leaving the margin in place reads as a
+    // dark seam around the snapped paper (the shadow lives inside that margin, and the
+    // rounded corners leak the wallpaper behind). Maximize is different: the system
+    // over-expands a maximized window by its resize border, which already pushes the
+    // margin off-screen — keep it as the offset.
+    private bool _isSnappedPresentation;
+
+
+    private void RefreshSnappedPresentation(bool forceApply = false)
+    {
+        if (_paperChrome == null)
+        {
+            return;
+        }
+
+        var snapped = !_paper.IsCollapsed &&
+            !IsPaperFormTransitioning &&
+            LooksSnappedNow();
+
+        if (snapped == _isSnappedPresentation)
+        {
+            // Callers at transition boundaries force a re-apply because the transition
+            // itself rewrites Margin/CornerRadius/Effect while the guards were up.
+            if (forceApply)
+            {
+                ApplyPaperChromePresentation();
+            }
+
+            return;
+        }
+
+        if (snapped)
+        {
+            if (TryGetCurrentSnapTileBounds(out var bounds))
+            {
+                _snappedPresentationBoundsForRestore = bounds;
+            }
+
+            _isSnappedPresentation = true;
+            DetachExperimentalWindowAttachment(savePosition: true);
+            ApplyPaperChromePresentation();
+            SaveGeometryIfAllowed();
+            return;
+        }
+
+        if (IsVisible && !_paper.IsCollapsed && !IsPaperFormTransitioning)
+        {
+            _snappedPresentationBoundsForRestore = null;
+        }
+
+        _isSnappedPresentation = false;
+        ApplyPaperChromePresentation();
+    }
+
+    // Central authority for the paper chrome's snap/form presentation: Effect, Margin and
+    // CornerRadius. Any code that changes these based on paper form (expanded vs capsule)
+    // or snap state should go through here so the inputs can't disagree with each other.
+    // Historical bug: two call sites (SetCollapsedState) mutated an existing DropShadowEffect
+    // in-place via `if (Effect is DropShadowEffect s)`. Once snap can set Effect=null,
+    // that check silently no-ops and the capsule ends up with expanded-shape shadow (or none).
+    private void ApplyPaperChromePresentation()
+    {
+        if (_paperChrome == null)
+        {
+            return;
+        }
+
+        var snappedExpanded = _isSnappedPresentation && !_paper.IsCollapsed;
+
+        // Snapped presentation: make the paper fill the tile edge-to-edge (no shadow, no
+        // margin, square corners). Works for Normal-state tiles (half/quarter) and Maximized.
+        if (snappedExpanded)
+        {
+            _paperChrome.Effect = null;
+            _paperChrome.BeginAnimation(Border.MarginProperty, null);
+            _paperChrome.Margin = new Thickness(0);
+            _paperChrome.CornerRadius = new CornerRadius(0);
+            RefreshPluginBodyClip();
+            RefreshExperimentalFocusPresentation(animate: false);
+            return;
+        }
+
+        // Floating or capsule: restore shadow, margin, and form-appropriate corner radius.
+        var isCapsule = _paper.IsCollapsed && _controller.State.UseCapsuleMode;
+        var targetCorner = PaperChromeCornerRadiusForState(isCapsule);
+        _paperChrome.BeginAnimation(Border.MarginProperty, null);
+        _paperChrome.Margin = new Thickness(WindowChromeMargin);
+        _paperChrome.CornerRadius = targetCorner;
+        _paperChrome.Effect = isCapsule
+            ? CreatePaperChromeShadow(blurRadius: 8, opacity: 0.12, shadowDepth: 1)
+            : CreatePaperChromeShadow();
+        RefreshPluginBodyClip();
+        RefreshExperimentalFocusPresentation(animate: false);
+    }
+
+    private bool LooksSnappedNow()
+    {
+        if (WindowState == WindowState.Minimized)
+        {
+            return false;
+        }
+
+        if (WindowState == WindowState.Maximized)
+        {
+            return true;
+        }
+
+        var workArea = WindowWorkAreaHelper.WorkAreaFor(this);
+        if (workArea.IsEmpty)
+        {
+            return false;
+        }
+
+        if (WindowNative.TryGetVisibleFrameScreenBounds(this, out var visibleFrameRect) &&
+            TryGetSnapTileBounds(visibleFrameRect, workArea, out _))
+        {
+            return true;
+        }
+
+        // WM_WINDOWPOSCHANGED arrives before WPF syncs Left/Top/Width/Height (that happens in
+        // the WM_MOVE/WM_SIZE that DefWindowProc raises afterwards, and never while maximized),
+        // so the DPs still hold the pre-snap rect here. Half/quarter snaps are a single
+        // SetWindowPos with no follow-up message, so judging by the DPs stays one move behind
+        // forever — read the live hwnd rect instead.
+        if (!TryGetWindowRectDip(out var windowRect))
+        {
+            return false;
+        }
+
+        var chromeRect = new Rect(
+            windowRect.Left + WindowChromeMargin,
+            windowRect.Top + WindowChromeMargin,
+            Math.Max(0, windowRect.Width - WindowChromeInset),
+            Math.Max(0, windowRect.Height - WindowChromeInset));
+
+        return MatchesSnapTile(windowRect, workArea) || MatchesSnapTile(chromeRect, workArea);
+    }
+
+    // The current hwnd rect (GetWindowRect, physical pixels) converted into this window's DIP
+    // space via the same per-monitor transform WorkAreaFor uses, so both rects stay comparable
+    // on mixed-DPI monitor setups.
+    private bool TryGetWindowRectDip(out Rect rect)
+    {
+        rect = Rect.Empty;
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero || !GetWindowRect(handle, out var native))
+        {
+            return false;
+        }
+
+        if (PresentationSource.FromVisual(this)?.CompositionTarget is not { } target)
+        {
+            return false;
+        }
+
+        var transform = target.TransformFromDevice;
+        rect = new Rect(
+            transform.Transform(new Point(native.Left, native.Top)),
+            transform.Transform(new Point(native.Right, native.Bottom)));
+        return true;
+    }
+
+    private static bool MatchesSnapTile(Rect rect, Rect workArea)
+    {
+        return TryGetSnapTileBounds(rect, workArea, out _);
+    }
+
+    private bool TryGetCurrentSnapTileBounds(out Rect bounds)
+    {
+        bounds = Rect.Empty;
+        if (WindowState == WindowState.Minimized)
+        {
+            return false;
+        }
+
+        var workArea = WindowWorkAreaHelper.WorkAreaFor(this);
+        if (workArea.IsEmpty)
+        {
+            return false;
+        }
+
+        if (WindowState == WindowState.Maximized)
+        {
+            bounds = workArea;
+            return true;
+        }
+
+        if (WindowNative.TryGetVisibleFrameScreenBounds(this, out var visibleFrameRect) &&
+            TryGetSnapTileBounds(visibleFrameRect, workArea, out bounds))
+        {
+            return true;
+        }
+
+        if (!TryGetWindowRectDip(out var windowRect))
+        {
+            return false;
+        }
+
+        if (TryGetSnapTileBounds(windowRect, workArea, out bounds))
+        {
+            return true;
+        }
+
+        var chromeRect = new Rect(
+            windowRect.Left + WindowChromeMargin,
+            windowRect.Top + WindowChromeMargin,
+            Math.Max(0, windowRect.Width - WindowChromeInset),
+            Math.Max(0, windowRect.Height - WindowChromeInset));
+
+        return TryGetSnapTileBounds(chromeRect, workArea, out bounds);
+    }
+
+    internal bool TryGetSnappedPresentationBoundsForGeometrySave(out Rect bounds)
+    {
+        bounds = Rect.Empty;
+        if (!_paper.IsCollapsed &&
+            (_isSnappedPresentation || WindowState == WindowState.Maximized) &&
+            TryGetCurrentSnapTileBounds(out bounds))
+        {
+            _snappedPresentationBoundsForRestore = bounds;
+            return true;
+        }
+
+        return false;
+    }
+
+    internal bool TryGetRememberedSnapTileBoundsForRestore(out Rect bounds)
+    {
+        bounds = Rect.Empty;
+        if (_paper.IsCollapsed || _snappedPresentationBoundsForRestore is not Rect remembered)
+        {
+            return false;
+        }
+
+        // The remembered snap tile was captured in this window's DIP space. Keep the
+        // restore-time validation in the same coordinate space; re-resolving from the rect
+        // uses system-DPI coordinates and can reject valid tiles on mixed-DPI monitors.
+        var workArea = WindowWorkAreaHelper.WorkAreaFor(this);
+        return TryGetSnapTileBounds(remembered, workArea, out bounds);
+    }
+
+    internal void RestoreSnapTilePresentation(Rect visibleTarget)
+    {
+        if (_paper.IsCollapsed)
+        {
+            return;
+        }
+
+        _isSnappedPresentation = true;
+        _snappedPresentationBoundsForRestore = visibleTarget;
+        ApplyPaperChromePresentation();
+        MoveWindowWithoutGeometrySave(() =>
+        {
+            Left = RoundToDevicePixelX(visibleTarget.Left);
+            Top = RoundToDevicePixelY(visibleTarget.Top);
+            Width = RoundToDevicePixelX(Math.Max(MinWidth, visibleTarget.Width));
+            Height = RoundToDevicePixelY(Math.Max(MinHeight, visibleTarget.Height));
+        });
+        UpdateLayout();
+        AlignVisibleFrameToBounds(visibleTarget);
+        _isSnappedPresentation = true;
+        ApplyPaperChromePresentation();
+    }
+
+    internal void AlignVisibleFrameToBounds(Rect visibleTarget)
+    {
+        if (!WindowNative.TryGetVisibleFrameScreenBounds(this, out var visibleBounds) ||
+            visibleBounds.IsEmpty)
+        {
+            return;
+        }
+
+        var dx = visibleTarget.Left - visibleBounds.Left;
+        var dy = visibleTarget.Top - visibleBounds.Top;
+        var dw = visibleTarget.Width - visibleBounds.Width;
+        var dh = visibleTarget.Height - visibleBounds.Height;
+        if (Math.Abs(dx) < 0.5 && Math.Abs(dy) < 0.5 && Math.Abs(dw) < 0.5 && Math.Abs(dh) < 0.5)
+        {
+            return;
+        }
+
+        MoveWindowWithoutGeometrySave(() =>
+        {
+            Left = RoundToDevicePixelX(Left + dx);
+            Top = RoundToDevicePixelY(Top + dy);
+            Width = RoundToDevicePixelX(Math.Max(MinWidth, Width + dw));
+            Height = RoundToDevicePixelY(Math.Max(MinHeight, Height + dh));
+        });
+        RefreshSnappedPresentation(forceApply: true);
+    }
+
+    private static bool TryGetSnapTileBounds(Rect rect, Rect workArea, out Rect bounds)
+    {
+        bounds = Rect.Empty;
+        if (rect.IsEmpty || workArea.IsEmpty)
+        {
+            return false;
+        }
+
+        const double tolerance = WindowChromeInset + 4.0;
+        // A window must occupy at least this fraction of a work-area dimension before a mere
+        // edge graze counts as a snapped tile — keeps small free-floating windows out.
+        const double minSpanRatio = 0.20;
+        var wa = workArea;
+        bool nearLeft = Math.Abs(rect.Left - wa.Left) <= tolerance;
+        bool nearTop = Math.Abs(rect.Top - wa.Top) <= tolerance;
+        bool nearRight = Math.Abs(rect.Right - wa.Right) <= tolerance;
+        bool nearBottom = Math.Abs(rect.Bottom - wa.Bottom) <= tolerance;
+
+        bool fullWidth = nearLeft && nearRight && Math.Abs(rect.Width - wa.Width) <= tolerance;
+        bool fullHeight = nearTop && nearBottom && Math.Abs(rect.Height - wa.Height) <= tolerance;
+        bool horizontallyContained = rect.Left >= wa.Left - tolerance && rect.Right <= wa.Right + tolerance;
+        bool centerThirdColumn =
+            !nearLeft &&
+            !nearRight &&
+            horizontallyContained &&
+            Math.Abs(rect.Left - (wa.Left + wa.Width / 3)) <= tolerance &&
+            Math.Abs(rect.Right - (wa.Left + wa.Width * 2 / 3)) <= tolerance;
+        bool centerHalfColumn =
+            !nearLeft &&
+            !nearRight &&
+            horizontallyContained &&
+            Math.Abs(rect.Left - (wa.Left + wa.Width / 4)) <= tolerance &&
+            Math.Abs(rect.Right - (wa.Left + wa.Width * 3 / 4)) <= tolerance;
+
+        // Maximized / full-area tile.
+        if (fullWidth && fullHeight)
+        {
+            bounds = wa;
+            return true;
+        }
+
+        // Edge columns may use any width after the divider is dragged. Interior columns are
+        // limited to Windows 11's standard equal-thirds and 25/50/25 center tiles so an
+        // arbitrary full-height floating window is not mistaken for a Snap Layout member.
+        if (fullHeight &&
+            ((nearLeft ^ nearRight) || centerThirdColumn || centerHalfColumn) &&
+            rect.Width >= wa.Width * minSpanRatio)
+        {
+            var left = nearLeft ? wa.Left : Math.Clamp(rect.Left, wa.Left, wa.Right);
+            var right = nearRight ? wa.Right : Math.Clamp(rect.Right, wa.Left, wa.Right);
+            if (right - left >= tolerance)
+            {
+                bounds = new Rect(new Point(left, wa.Top), new Point(right, wa.Bottom));
+                return true;
+            }
+        }
+
+        // Row tile: spans the full width and is docked to exactly one horizontal edge, at any
+        // height. Capture the actual occupied height.
+        if (fullWidth && (nearTop ^ nearBottom) && rect.Height >= wa.Height * minSpanRatio)
+        {
+            var top = nearTop ? wa.Top : Math.Clamp(rect.Top, wa.Top, wa.Bottom);
+            var bottom = nearBottom ? wa.Bottom : Math.Clamp(rect.Bottom, wa.Top, wa.Bottom);
+            if (bottom - top >= tolerance)
+            {
+                bounds = new Rect(new Point(wa.Left, top), new Point(wa.Right, bottom));
+                return true;
+            }
+        }
+
+        // Standard stacked corner tiles are half-height and either half-width or one-third
+        // width (the latter appears beside a 2/3 main column). Keep the ratio gates instead of
+        // accepting any corner-adjacent floating window.
+        bool halfWidth = Math.Abs(rect.Width - wa.Width / 2) <= tolerance;
+        bool thirdWidth = Math.Abs(rect.Width - wa.Width / 3) <= tolerance;
+        bool halfHeight = Math.Abs(rect.Height - wa.Height / 2) <= tolerance;
+        if ((halfWidth || thirdWidth) && halfHeight && (nearLeft ^ nearRight) && (nearTop ^ nearBottom))
+        {
+            var left = nearLeft ? wa.Left : Math.Clamp(rect.Left, wa.Left, wa.Right);
+            var right = nearRight ? wa.Right : Math.Clamp(rect.Right, wa.Left, wa.Right);
+            var top = nearTop ? wa.Top : Math.Clamp(rect.Top, wa.Top, wa.Bottom);
+            var bottom = nearBottom ? wa.Bottom : Math.Clamp(rect.Bottom, wa.Top, wa.Bottom);
+            if (right - left >= tolerance && bottom - top >= tolerance)
+            {
+                bounds = new Rect(new Point(left, top), new Point(right, bottom));
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static DropShadowEffect CreatePaperChromeShadow(
+        double blurRadius = 14,
+        double opacity = 0.22,
+        double shadowDepth = 2)
+    {
+        return new DropShadowEffect
+        {
+            BlurRadius = blurRadius,
+            ShadowDepth = shadowDepth,
+            Opacity = opacity
+        };
+    }
+
+    public void CancelPendingVisibilityTransitions()
+    {
+        BeginAnimation(Window.OpacityProperty, null);
+        Opacity = 1.0;
+
+        _edgeCapsule.CancelTransition();
+
+        if (IsDeepCapsuleSlotRetracting)
+        {
+            if (!_paper.IsCollapsed &&
+                _controller.State.UseCapsuleMode &&
+                _controller.State.UseDeepCapsuleMode &&
+                _edgeCapsuleHost?.IsVisible == true)
+            {
+                ChangeEdgeCapsulePaperForm(
+                    EdgeCapsulePaperForm.Expanded,
+                    reserveWhileExpanded: true);
+            }
+            else
+            {
+                DetachEdgeCapsuleFromQueue();
+            }
+        }
+
+        FlushEdgeCapsulePresentation(EdgeCapsuleTransitionReason.State);
+    }
+
+    private void ConfigureWindow()
+    {
+        InitializeThemeResources();
+        Title = _controller.PaperTitleText(_paper);
+        ShowInTaskbar = ShouldShowInTaskbar();
+        WindowStartupLocation = WindowStartupLocation.Manual;
+
+        Left = _paper.X;
+        Top = _paper.Y;
+
+        if (_paper.IsCollapsed && _controller.State.UseCapsuleMode)
+        {
+            Width = CapsuleWindowWidth();
+            Height = PaperLayoutDefaults.CapsuleHeight;
+            MinWidth = CapsuleWindowWidth();
+            MinHeight = PaperLayoutDefaults.CapsuleHeight;
+            ResizeMode = ResizeMode.NoResize;
+        }
+        else
+        {
+            Width = _paper.Width;
+            Height = _paper.Height;
+            MinWidth = PaperLayoutDefaults.MinWidth;
+            MinHeight = PaperLayoutDefaults.MinHeight;
+            ResizeMode = ResizeMode.CanResizeWithGrip;
+        }
+
+        RefreshEffectiveTopmost();
+        WindowStyle = WindowStyle.None;
+        AllowsTransparency = true;
+        Background = Brushes.Transparent;
+        FontFamily = AppTypography.UiFontFamily;
+        FontSize = AppTypography.Scale(12);
+        Language = AppTypography.Language;
+        SnapsToDevicePixels = true;
+        UseLayoutRounding = true;
+        AppTypography.ApplyTextRendering(this);
+    }
+
+    private void InitializeThemeResources()
+    {
+        Resources["PaperBrushKey"] = PaperBrush;
+        Resources["PaperBorderBrushKey"] = PaperBorderBrush;
+        Resources["TextBrushKey"] = TextBrush;
+        Resources["WeakTextBrushKey"] = WeakTextBrush;
+        Resources["HoverBrushKey"] = HoverBrush;
+        Resources["LinkBrushKey"] = Theme.LinkBrush;
+        Resources["DropIndicatorBrushKey"] = DropIndicatorBrush;
+        Resources["AppendDropBrushKey"] = AppendDropBrush;
+        Resources["MenuHoverBrushKey"] = MenuHoverBrush;
+        Resources["TitleBarBrushKey"] = TitleBarBrush;
+        Resources["TitleBarDividerBrushKey"] = TitleBarDividerBrush;
+
+        Resources["CheckBoxBorderBrushKey"] = CheckBoxBorderBrush;
+        Resources["CheckBoxActiveBrushKey"] = Theme.ActiveBrush;
+        Resources["CheckBoxUncheckedHoverBorderBrushKey"] = Theme.CheckBoxHoverBorderBrush;
+        Resources["CheckBoxUncheckedHoverBgKey"] = Theme.CheckBoxUncheckedHoverBgBrush;
+        Resources["CheckBoxActiveHoverBrushKey"] = Theme.CheckBoxActiveHoverBrush;
+    }
+
+    public void UpdateTheme()
+    {
+        var oldPaperColor = TryGetSolidColor(_paperChrome?.Background, out var capturedPaperColor)
+            ? capturedPaperColor
+            : (Color?)null;
+        var oldBorderColor = TryGetSolidColor(_paperChrome?.BorderBrush, out var capturedBorderColor)
+            ? capturedBorderColor
+            : (Color?)null;
+
+        _themeAnimationGeneration++;
+        var themeAnimationGeneration = _themeAnimationGeneration;
+
+        InitializeThemeResources();
+        _experimentalTetherCapsule?.UpdateTheme();
+        RefreshThemedContextMenus();
+
+        var canAnimateTheme = _controller.State.EnableAnimations &&
+            _paperChrome != null &&
+            oldPaperColor.HasValue &&
+            oldBorderColor.HasValue &&
+            TryGetSolidColor(Resources["PaperBrushKey"] as Brush, out var newPaperColor) &&
+            TryGetSolidColor(Resources["PaperBorderBrushKey"] as Brush, out var newBorderColor);
+
+        // 主题动画只能使用临时本地画刷；完成后必须恢复动态资源绑定。
+        if (_controller.State.EnableAnimations && _paperChrome != null)
+        {
+            if (canAnimateTheme)
+            {
+                var pendingAnimations = 0;
+
+                void MarkThemeAnimationComplete()
+                {
+                    pendingAnimations--;
+                    if (pendingAnimations <= 0 && themeAnimationGeneration == _themeAnimationGeneration)
+                    {
+                        RestorePaperChromeThemeReferences();
+                    }
+                }
+
+                pendingAnimations++;
+                AnimatePaperChromeBrush(
+                    oldPaperColor!.Value,
+                    newPaperColor,
+                    brush => _paperChrome.Background = brush,
+                    MarkThemeAnimationComplete);
+
+                pendingAnimations++;
+                AnimatePaperChromeBrush(
+                    oldBorderColor!.Value,
+                    newBorderColor,
+                    brush => _paperChrome.BorderBrush = brush,
+                    MarkThemeAnimationComplete);
+            }
+            else
+            {
+                RestorePaperChromeThemeReferences();
+            }
+        }
+        else
+        {
+            RestorePaperChromeThemeReferences();
+        }
+
+        RefreshPaperTitle();
+        RefreshPaperIconButton();
+        RefreshWindowBindingButton();
+        UpdateTextZoom();
+        UpdateDeepCapsuleSlotHostTheme();
+
+        if (_paper.Type == PaperTypes.Note)
+        {
+            NotifyCurrentPaperBodyThemeChanged();
+        }
+        else
+        {
+            RebuildTodoRows(CurrentFocusedTodoItemId());
+        }
+    }
+
+    public void UpdateTypography()
+    {
+        FontFamily = AppTypography.UiFontFamily;
+        FontSize = AppTypography.Scale(12);
+        Language = AppTypography.Language;
+        AppTypography.ApplyTextRendering(this);
+
+        if (_titleText != null)
+        {
+            _titleText.FontFamily = TitleFontFamily;
+            _titleText.FontSize = TitleFontSize;
+            _titleText.FontWeight = TitleFontWeight;
+            _titleText.MinHeight = TitleLineHeight + 1;
+        }
+
+        if (_titleEditBox != null)
+        {
+            _titleEditBox.FontFamily = TitleFontFamily;
+            _titleEditBox.FontSize = TitleFontSize;
+            _titleEditBox.FontWeight = TitleFontWeight;
+            _titleEditBox.MinHeight = TitleLineHeight + 1;
+        }
+
+        if (_topBar != null)
+        {
+            _topBar.Height = TitleBarHeight;
+        }
+
+        if (_openMarkdownButton != null)
+        {
+            _openMarkdownButton.FontFamily = AppTypography.UiFontFamily;
+            _openMarkdownButton.FontSize = AppTypography.Scale(10.5);
+            _openMarkdownButton.Padding = new Thickness(0, AppTypography.Scale(1.4), 0, 0);
+        }
+
+        if (_windowBindingButton != null)
+        {
+            _windowBindingButton.FontSize = AppTypography.Scale(13);
+            RefreshAssociationButton();
+        }
+
+        if (_newTodoButton != null)
+        {
+            _newTodoButton.FontSize = AppTypography.Scale(13);
+            _newTodoButton.Content = CreateTopBarNewTodoIcon(_newTodoButton);
+        }
+
+        if (_newNoteButton != null)
+        {
+            _newNoteButton.FontSize = AppTypography.Scale(13);
+            _newNoteButton.Content = CreateTopBarNewNoteIcon(_newNoteButton);
+        }
+
+        if (_closeButton != null)
+        {
+            _closeButton.FontSize = AppTypography.Scale(16);
+            _closeButton.Margin = new Thickness(AppTypography.Scale(1), -AppTypography.Scale(0.6), AppTypography.Scale(1), AppTypography.Scale(0.6));
+            RefreshCloseButton();
+        }
+
+        if (_textZoomIndicator != null)
+        {
+            _textZoomIndicator.FontSize = AppTypography.Scale(10.5);
+        }
+
+        if (_paper.Type == PaperTypes.Note)
+        {
+            NotifyCurrentPaperBodyTypographyChanged();
+        }
+
+        if (_paper.Type == PaperTypes.Todo)
+        {
+            RebuildTodoRows(CurrentFocusedTodoItemId());
+        }
+
+        if (_capsuleIconText != null)
+        {
+            _capsuleIconText.FontFamily = AppTypography.SymbolFontFamily;
+            _capsuleIconText.FontSize = CapsuleIconFontSizeForCurrentPaper();
+        }
+
+        if (_capsuleLabelText != null)
+        {
+            _capsuleLabelText.FontFamily = CapsuleLabelFontFamily;
+            _capsuleLabelText.FontSize = CapsuleLabelFontSize;
+            _capsuleLabelText.FontWeight = CapsuleLabelFontWeight;
+        }
+
+        if (_capsuleCloseGlyph != null)
+        {
+            _capsuleCloseGlyph.FontSize = AppTypography.Scale(18);
+        }
+
+        _edgeCapsuleHost?.UpdateTypography(
+            CapsuleLabelFontFamily,
+            AppTypography.SymbolFontFamily,
+            AppTypography.Language,
+            CapsuleIconFontSizeForCurrentPaper(),
+            CapsuleLabelFontSize,
+            CapsuleLabelFontWeight,
+            AppTypography.Scale(18));
+        RefreshThemedContextMenus();
+
+        RefreshPaperTitle();
+        UpdateTopBarResponsiveLayout();
+        ApplyCurrentCollapsedCapsuleWidth();
+    }
+
+    private void ApplyCurrentCollapsedCapsuleWidth()
+    {
+        if (!_paper.IsCollapsed || IsPaperFormTransitioning)
+        {
+            return;
+        }
+
+        var previousWidth = double.IsFinite(Width) && Width > 0 ? Width : ActualWidth;
+        var width = CapsuleWindowWidth();
+        var workArea = WindowWorkAreaHelper.WorkAreaFor(this);
+        var preserveRightEdge = !HasDeepCapsuleSlotPlacement &&
+            double.IsFinite(Left) &&
+            previousWidth > 0 &&
+            !workArea.IsEmpty &&
+            Math.Abs(workArea.Right - (Left + previousWidth)) <= WindowChromeMargin + 2;
+
+        MoveWindowWithoutGeometrySave(() =>
+        {
+            if (preserveRightEdge)
+            {
+                Left = RoundToDevicePixelX(Left + previousWidth - width);
+            }
+
+            MinWidth = width;
+            Width = width;
+        });
+    }
+
+    private static bool TryGetSolidColor(Brush? brush, out Color color)
+    {
+        if (brush is SolidColorBrush solidBrush)
+        {
+            color = solidBrush.Color;
+            return true;
+        }
+
+        color = default;
+        return false;
+    }
+
+    private void AnimatePaperChromeBrush(Color from, Color to, Action<SolidColorBrush> assignBrush, Action onComplete)
+    {
+        var transitionBrush = new SolidColorBrush(from);
+        assignBrush(transitionBrush);
+
+        var animation = new System.Windows.Media.Animation.ColorAnimation(to, TimeSpan.FromMilliseconds(300))
+        {
+            EasingFunction = AnimationHelper.SmoothEase
+        };
+        animation.Completed += (_, _) => onComplete();
+        transitionBrush.BeginAnimation(SolidColorBrush.ColorProperty, animation);
+    }
+
+    private void RestorePaperChromeThemeReferences()
+    {
+        if (_paperChrome == null)
+        {
+            return;
+        }
+
+        _paperChrome.SetResourceReference(Border.BackgroundProperty, "PaperBrushKey");
+        _paperChrome.SetResourceReference(Border.BorderBrushProperty, "PaperBorderBrushKey");
+    }
+
+    private void BuildShell()
+    {
+        _windowHost = new Grid
+        {
+            Background = Brushes.Transparent,
+            ClipToBounds = false
+        };
+        Content = _windowHost;
+
+        _paperChrome = new PaperChromeBorder
+        {
+            Margin = new Thickness(WindowChromeMargin),
+            CornerRadius = PaperChromeCornerRadiusForState(_paper.IsCollapsed && _controller.State.UseCapsuleMode),
+            BorderThickness = new Thickness(1),
+            SnapsToDevicePixels = true,
+            Effect = CreatePaperChromeShadow()
+        };
+        _paperChrome.SetResourceReference(Border.BackgroundProperty, "PaperBrushKey");
+        _paperChrome.SetResourceReference(Border.BorderBrushProperty, "PaperBorderBrushKey");
+
+        // Chrome-level drag gesture: when users click the chrome background itself (top margin
+        // area in snapped state, or transparent margin in floating state), initiate title bar
+        // drag. This covers the gap where top.Margin creates a dead zone at the window's edge.
+        _paperChrome.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            if (e.OriginalSource == _paperChrome || e.OriginalSource == _windowHost || e.OriginalSource == _shell)
+            {
+                BeginTitleBarDragGesture(_paperChrome, e);
+            }
+        };
+        _paperChrome.PreviewMouseMove += (_, e) =>
+        {
+            if (e.OriginalSource == _paperChrome || e.OriginalSource == _windowHost || e.OriginalSource == _shell)
+            {
+                UpdateTitleBarDragGesture(_paperChrome, e);
+            }
+        };
+        _paperChrome.PreviewMouseLeftButtonUp += (_, e) =>
+        {
+            if (e.OriginalSource == _paperChrome || e.OriginalSource == _windowHost || e.OriginalSource == _shell)
+            {
+                EndTitleBarDragGesture(_paperChrome);
+            }
+        };
+        _paperChrome.LostMouseCapture += (_, _) => EndTitleBarDragGesture(_paperChrome);
+        _paperChrome.ContextMenuOpening += OnPaperChromeContextMenuOpening;
+
+        _windowHost.Children.Add(_paperChrome);
+
+        _containerGrid.Background = Brushes.Transparent;
+        _containerGrid.ClipToBounds = false;
+        _containerGrid.RenderTransform = _shellScale;
+        _containerGrid.RenderTransformOrigin = new Point(0, 0);
+        _paperChrome.Child = _containerGrid;
+
+        _shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        _shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        _containerGrid.Children.Add(_shell);
+
+        BuildTopBar();
+        BuildBody();
+        BuildDragLayer();
+
+        BuildCapsuleShell();
+        AttachCapsuleShellToWindowHost();
+
+        if (_paper.IsCollapsed && _controller.State.UseCapsuleMode)
+        {
+            _shell.Visibility = Visibility.Collapsed;
+            _shell.Opacity = 0;
+            _capsuleShell.Visibility = Visibility.Visible;
+            _capsuleShell.Opacity = 1;
+        }
+        else
+        {
+            _shell.Visibility = Visibility.Visible;
+            _shell.Opacity = 1;
+            _capsuleShell.Visibility = Visibility.Collapsed;
+            _capsuleShell.Opacity = 0;
+        }
+
+        _paperChrome.ContextMenu = BuildPaperContextMenu();
+        UpdateTextZoom();
+        ApplyPaperChromePresentation();
+    }
+
+    private void AttachCapsuleShellToWindowHost()
+    {
+        _capsuleShell.BeginAnimation(UIElement.OpacityProperty, null);
+        _capsuleShell.Margin = new Thickness(WindowChromeMargin);
+        _capsuleShell.HorizontalAlignment = HorizontalAlignment.Left;
+        _capsuleShell.VerticalAlignment = VerticalAlignment.Top;
+        if (_controller.State.ExperimentalRestingCapsuleOpacity ||
+            _controller.IsAdvancedCapsuleTransparent(_paper))
+        {
+            AttachCapsuleShellToExperimentalOpacityHost();
+        }
+        else
+        {
+            AttachCapsuleShellDirectlyToWindowHost();
+        }
+    }
+
+    private void AttachCapsuleShellToExperimentalOpacityHost()
+    {
+        if (_capsuleOpacityHost == null)
+        {
+            var host = new Grid();
+            host.MouseEnter += (_, _) => RefreshExperimentalOpacity();
+            host.MouseLeave += (_, _) => RefreshExperimentalOpacity();
+            _capsuleOpacityHost = host;
+        }
+
+        if (_windowHost.Children.Contains(_capsuleShell))
+        {
+            _windowHost.Children.Remove(_capsuleShell);
+        }
+        if (!_capsuleOpacityHost.Children.Contains(_capsuleShell))
+        {
+            _capsuleOpacityHost.Children.Add(_capsuleShell);
+        }
+        Panel.SetZIndex(_capsuleOpacityHost, 10);
+        if (!_windowHost.Children.Contains(_capsuleOpacityHost))
+        {
+            _windowHost.Children.Add(_capsuleOpacityHost);
+        }
+    }
+
+    private void AttachCapsuleShellDirectlyToWindowHost()
+    {
+        if (_capsuleOpacityHost != null)
+        {
+            _capsuleOpacityHost.BeginAnimation(UIElement.OpacityProperty, null);
+            _capsuleOpacityHost.Opacity = 1.0;
+            if (_capsuleOpacityHost.Children.Contains(_capsuleShell))
+            {
+                _capsuleOpacityHost.Children.Remove(_capsuleShell);
+            }
+            _windowHost.Children.Remove(_capsuleOpacityHost);
+            _capsuleOpacityHost = null;
+        }
+
+        Panel.SetZIndex(_capsuleShell, 10);
+        if (!_windowHost.Children.Contains(_capsuleShell))
+        {
+            _windowHost.Children.Add(_capsuleShell);
+        }
+    }
+
+    private void BuildDragLayer()
+    {
+        _dragLayer = new Canvas
+        {
+            IsHitTestVisible = false,
+            Background = Brushes.Transparent,
+            ClipToBounds = false
+        };
+
+        Grid.SetRowSpan(_dragLayer, 3);
+        Panel.SetZIndex(_dragLayer, 1000);
+        _shell.Children.Add(_dragLayer);
+    }
+
+    private void BeginTitleBarDragGesture(FrameworkElement dragSource, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left)
+        {
+            return;
+        }
+
+        EndTitleBarDragGesture();
+        var startPosition = e.GetPosition(this);
+        var tetherAnchor = CaptureExperimentalTetherDragAnchor();
+        var startScreenPosition = default(DeviceScreenPoint);
+        if (tetherAnchor.HasValue)
+        {
+            startScreenPosition =
+                WindowNative.TryGetCursorScreenPosition(out var cursor)
+                    ? cursor
+                    : DeviceScreenPoint.FromPoint(
+                        PointToScreen(startPosition));
+        }
+        _titleBarDragSession = new TitleBarDragSession(
+            dragSource,
+            startPosition,
+            startScreenPosition,
+            tetherAnchor);
+        dragSource.CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void UpdateTitleBarDragGesture(FrameworkElement dragSource, MouseEventArgs e)
+    {
+        var session = _titleBarDragSession;
+        if (session == null || !ReferenceEquals(session.Source, dragSource))
+        {
+            return;
+        }
+
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            EndTitleBarDragGesture(dragSource);
+            return;
+        }
+
+        if (session.TetherAnchor is { } tetherAnchor &&
+            WindowNative.TryGetCursorScreenPosition(
+                out var currentScreenPosition))
+        {
+            var tetherUpdate = UpdateExperimentalTetherDrag(
+                tetherAnchor,
+                session.StartScreenPosition,
+                currentScreenPosition);
+            if (tetherUpdate is
+                ExperimentalTetherDragUpdate.Pending or
+                ExperimentalTetherDragUpdate.Sliding)
+            {
+                session.TetherMoved |=
+                    tetherUpdate ==
+                    ExperimentalTetherDragUpdate.Sliding;
+                e.Handled = true;
+                return;
+            }
+
+            if (tetherUpdate ==
+                ExperimentalTetherDragUpdate.Detach)
+            {
+                EndTitleBarDragGesture(dragSource);
+                DetachExperimentalAttachmentBeforeUserDrag();
+                _ = WindowNative.TryBeginWindowCaptionDrag(
+                    this,
+                    currentScreenPosition);
+                e.Handled = true;
+                return;
+            }
+        }
+
+        var current = e.GetPosition(this);
+        if (Math.Abs(current.X - session.StartPosition.X) < TitleBarDragThreshold &&
+            Math.Abs(current.Y - session.StartPosition.Y) < TitleBarDragThreshold)
+        {
+            return;
+        }
+
+        EndTitleBarDragGesture(dragSource);
+        DetachExperimentalAttachmentBeforeUserDrag();
+        WindowNative.BeginWindowCaptionDrag(this);
+        e.Handled = true;
+    }
+
+    private void EndTitleBarDragGesture(FrameworkElement dragSource)
+    {
+        if (_titleBarDragSession == null || !ReferenceEquals(_titleBarDragSession.Source, dragSource))
+        {
+            return;
+        }
+
+        EndTitleBarDragGesture();
+    }
+
+    private void EndTitleBarDragGesture()
+    {
+        var session = _titleBarDragSession;
+        _titleBarDragSession = null;
+        if (session?.Source.IsMouseCaptured == true)
+        {
+            session.Source.ReleaseMouseCapture();
+        }
+        if (session?.TetherMoved == true)
+        {
+            SaveGeometryForCurrentPresentation();
+        }
+    }
+
+    private void BuildTopBar()
+    {
+        var top = _topBar = new Grid
+        {
+            Height = TitleBarHeight,
+            Margin = new Thickness(3, 3, 6, 0),
+            Background = Brushes.Transparent
+        };
+
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        top.PreviewMouseLeftButtonDown += (_, e) =>
+        {
+            var source = e.OriginalSource as DependencyObject;
+            if (_isEditingTitle && !IsTitleEditBoxEventSource(source))
+            {
+                CommitTitleEdit();
+                _suppressTitleEditFromCurrentClick = true;
+                Dispatcher.BeginInvoke(
+                    (Action)(() => _suppressTitleEditFromCurrentClick = false),
+                    System.Windows.Threading.DispatcherPriority.Input);
+            }
+
+            if (!IsTitleEditBoxEventSource(source))
+            {
+                ExitNoteEditor();
+            }
+        };
+        top.MouseLeftButtonDown += (_, e) =>
+        {
+            if (IsTitleEditBoxEventSource(e.OriginalSource as DependencyObject))
+            {
+                return;
+            }
+
+            if (e.ChangedButton == MouseButton.Left && e.ClickCount == 1)
+            {
+                BeginTitleBarDragGesture(top, e);
+            }
+        };
+        top.PreviewMouseMove += (_, e) => UpdateTitleBarDragGesture(top, e);
+        top.PreviewMouseLeftButtonUp += (_, _) => EndTitleBarDragGesture(top);
+        top.LostMouseCapture += (_, _) => EndTitleBarDragGesture(top);
+
+        var titleArea = _topBarTitleArea = new Grid
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
+        titleArea.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        titleArea.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        _paperIconButton = IconButton("", _paper.AlwaysOnTop ? Strings.Get("Unpin") : Strings.Get("Pin"));
+        _paperIconButton.Width = 23;
+        _paperIconButton.HorizontalAlignment = HorizontalAlignment.Left;
+        _paperIconButton.VerticalAlignment = VerticalAlignment.Center;
+        _paperIconButton.Click += (_, _) => ToggleTopmost();
+        _paperIconButton.MouseEnter += (_, _) => _paperIconButton.Opacity = 1.0;
+        _paperIconButton.MouseLeave += (_, _) => RefreshPaperIconButton();
+        RefreshPaperIconButton();
+
+        Grid.SetColumn(_paperIconButton, 0);
+        titleArea.Children.Add(_paperIconButton);
+
+        var titleHost = _topBarTitleHost = new Border
+        {
+            Margin = new Thickness(0, 1, 8, 1),
+            Padding = new Thickness(4, 0, 5, 0),
+            CornerRadius = new CornerRadius(RadiusControl),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Background = Brushes.Transparent,
+            Cursor = Cursors.IBeam,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            MinWidth = 38,
+            MaxWidth = 86,
+            ToolTip = Strings.Get("ToolTipEditTitle")
+        };
+        titleHost.SetResourceReference(Border.BorderBrushProperty, "TitleBarDividerBrushKey");
+
+        var titleEditLayer = new Grid
+        {
+            MinWidth = 30,
+            MaxWidth = 76,
+            MinHeight = TitleLineHeight + 1,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        _titleText = new TextBlock
+        {
+            Foreground = TextBrush,
+            FontFamily = TitleFontFamily,
+            FontSize = TitleFontSize,
+            MinHeight = TitleLineHeight + 1,
+            FontWeight = TitleFontWeight,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center,
+            Cursor = Cursors.IBeam
+        };
+
+        _titleEditBox = new TextBox
+        {
+            Visibility = Visibility.Collapsed,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            Foreground = TextBrush,
+            CaretBrush = TextBrush,
+            FontFamily = TitleFontFamily,
+            FontSize = TitleFontSize,
+            MinHeight = TitleLineHeight + 1,
+            FontWeight = TitleFontWeight,
+            // UTF-16 unit guard at the hard full-width cap (20). Commit still clamps to the
+            // user setting (2–20) via PaperTitles.CleanCustomTitle so IME is not rewritten mid-edit.
+            MaxLength = PaperTitles.MaxTitleLength,
+            Padding = new Thickness(0),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            FocusVisualStyle = null
+        };
+        _titleEditBox.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Enter)
+            {
+                CommitTitleEdit();
+                e.Handled = true;
+            }
+            else if (e.Key == Key.Escape)
+            {
+                EndTitleEdit(commit: false);
+                e.Handled = true;
+            }
+        };
+        _titleEditBox.LostKeyboardFocus += (_, _) =>
+        {
+            if (_isEditingTitle)
+            {
+                CommitTitleEdit();
+            }
+        };
+
+        titleEditLayer.Children.Add(_titleText);
+        titleEditLayer.Children.Add(_titleEditBox);
+        titleHost.Child = titleEditLayer;
+        titleHost.MouseEnter += (_, _) => titleHost.Background = HoverBrush;
+        titleHost.MouseLeave += (_, _) => titleHost.Background = Brushes.Transparent;
+        titleHost.MouseLeftButtonDown += (_, e) =>
+        {
+            if (_suppressTitleEditFromCurrentClick)
+            {
+                _suppressTitleEditFromCurrentClick = false;
+                e.Handled = true;
+                return;
+            }
+
+            if (_isEditingTitle && IsTitleEditBoxEventSource(e.OriginalSource as DependencyObject))
+            {
+                return;
+            }
+
+            BeginTitleEdit();
+            e.Handled = true;
+        };
+
+        Grid.SetColumn(titleHost, 1);
+        titleArea.Children.Add(titleHost);
+
+        RefreshPaperTitle(invalidatePreview: false);
+
+        Grid.SetColumn(titleArea, 0);
+        top.Children.Add(titleArea);
+
+        var buttons = _topBarButtonsHost = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var actionButtons = _topBarActionButtonsHost = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        buttons.Children.Add(actionButtons);
+
+        _newTodoButton = IconButton("", Strings.Get("ToolTipNewTodoPaper"));
+        _newTodoButton.Content = CreateTopBarNewTodoIcon(_newTodoButton);
+        _newTodoButton.Click += (_, _) => _controller.CreatePaper(PaperTypes.Todo, show: true, _paper);
+
+        _newNoteButton = IconButton("", Strings.Get("ToolTipNewNotePaper"));
+        _newNoteButton.Content = CreateTopBarNewNoteIcon(_newNoteButton);
+        _newNoteButton.Click += (_, _) => _controller.CreatePaper(PaperTypes.Note, show: true, _paper);
+
+        var windowBindingButton = IconButton(
+            "",
+            AssociationDragHint());
+        ConfigureWindowBindingButton(windowBindingButton);
+        actionButtons.Children.Add(windowBindingButton);
+
+        if (_paper.Type == PaperTypes.Note)
+        {
+            _openMarkdownButton = IconButton(ExternalOpenButtonLabel(), OpenMarkdownEditorToolTip());
+            _openMarkdownButton.FontFamily = AppTypography.UiFontFamily;
+            _openMarkdownButton.FontSize = AppTypography.Scale(10.5);
+            _openMarkdownButton.Padding = new Thickness(0, AppTypography.Scale(1.4), 0, 0);
+            _openMarkdownButton.Click += (_, _) => OpenMarkdownInDefaultEditor();
+            actionButtons.Children.Add(_openMarkdownButton);
+        }
+
+        _closeButton = IconButton("", Strings.Get("ToolTipHideThisPaper"));
+        _closeButton.FontSize = AppTypography.Scale(16);
+        _closeButton.Margin = new Thickness(AppTypography.Scale(1), -AppTypography.Scale(0.6), AppTypography.Scale(1), AppTypography.Scale(0.6));
+        _closeButton.Click += (_, _) =>
+        {
+            if (CanDisplayAsCapsule())
+            {
+                SetCollapsedState(true);
+            }
+            else
+            {
+                _controller.HidePaper(_paper);
+            }
+        };
+        RefreshCloseButton();
+
+        actionButtons.Children.Add(_newTodoButton);
+        actionButtons.Children.Add(_newNoteButton);
+        buttons.Children.Add(_closeButton);
+        UpdateTopBarNewPaperButtons();
+
+        Grid.SetColumn(buttons, 1);
+        top.Children.Add(buttons);
+
+        var topHost = _topBarHost = new Border
+        {
+            Margin = new Thickness(0, 0, 0, 1.5),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            CornerRadius = new CornerRadius(RadiusShell, RadiusShell, 0, 0),
+            Child = top
+        };
+        topHost.SetResourceReference(Border.BackgroundProperty, "TitleBarBrushKey");
+        topHost.SetResourceReference(Border.BorderBrushProperty, "TitleBarDividerBrushKey");
+        topHost.MouseLeftButtonDown += (_, e) => BeginTitleBarDragGesture(topHost, e);
+        topHost.PreviewMouseMove += (_, e) => UpdateTitleBarDragGesture(topHost, e);
+        topHost.PreviewMouseLeftButtonUp += (_, _) => EndTitleBarDragGesture(topHost);
+        topHost.LostMouseCapture += (_, _) => EndTitleBarDragGesture(topHost);
+
+        Grid.SetRow(topHost, 0);
+        _shell.Children.Add(topHost);
+        Dispatcher.BeginInvoke(
+            (Action)UpdateTopBarResponsiveLayout,
+            System.Windows.Threading.DispatcherPriority.Loaded);
+    }
+
+    private void UpdateTopBarResponsiveLayout()
+    {
+        if (_updatingTopBarResponsiveLayout ||
+            _topBar == null ||
+            _topBarTitleArea == null ||
+            _topBarTitleHost == null ||
+            _topBarButtonsHost == null ||
+            _topBarActionButtonsHost == null ||
+            _paperIconButton == null ||
+            _closeButton == null ||
+            _paper.IsCollapsed)
+        {
+            return;
+        }
+
+        var availableWidth = _topBar.ActualWidth;
+        if (!double.IsFinite(availableWidth) || availableWidth <= 0)
+        {
+            return;
+        }
+
+        _updatingTopBarResponsiveLayout = true;
+        try
+        {
+            // Use only stable, explicit layout sizes. Do not temporarily reveal collapsed
+            // controls or call Measure on the live visual tree: that can trigger extra
+            // SizeChanged passes and makes the decision depend on the previous state.
+            var leftButtonWidth = TopBarOuterWidth(_paperIconButton);
+            var titleChildMinimumWidth =
+                (_topBarTitleHost.Child as FrameworkElement)?.MinWidth ?? 0;
+            var titleMinimumWidth =
+                Math.Max(
+                    Math.Max(0, _topBarTitleHost.MinWidth),
+                    Math.Max(0, titleChildMinimumWidth) +
+                    _topBarTitleHost.Padding.Left +
+                    _topBarTitleHost.Padding.Right) +
+                _topBarTitleHost.Margin.Left +
+                _topBarTitleHost.Margin.Right;
+            var actionButtonsWidth = VisibleTopBarActionButtonsWidth();
+            var persistentButtonsWidth = TopBarOuterWidth(_closeButton);
+
+            // Stage 1: keep the left button, the title at its minimum width and a 2-DIP
+            // draggable gap. Collapse the complete right action group only when those
+            // stable minimum requirements would collide with it.
+            var hideRightButtons =
+                leftButtonWidth +
+                titleMinimumWidth +
+                TopBarCollisionGap +
+                actionButtonsWidth +
+                persistentButtonsWidth >
+                availableWidth;
+
+            // Stage 2: after the right group has yielded, hide the title only when even its
+            // minimum width collides with the fixed left button and the 2-DIP gap.
+            var hideTitle =
+                hideRightButtons &&
+                leftButtonWidth +
+                titleMinimumWidth +
+                TopBarCollisionGap +
+                persistentButtonsWidth >
+                availableWidth;
+
+            if (hideTitle && _isEditingTitle)
+            {
+                CommitTitleEdit();
+            }
+
+            _topBarActionButtonsHost.Visibility = hideRightButtons
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+            _topBarTitleHost.Visibility = hideTitle
+                ? Visibility.Collapsed
+                : Visibility.Visible;
+        }
+        finally
+        {
+            _updatingTopBarResponsiveLayout = false;
+        }
+    }
+
+    private double VisibleTopBarActionButtonsWidth()
+    {
+        if (_topBarActionButtonsHost == null)
+        {
+            return 0;
+        }
+
+        var width = 0.0;
+        foreach (var child in _topBarActionButtonsHost.Children)
+        {
+            if (child is FrameworkElement element &&
+                element.Visibility == Visibility.Visible)
+            {
+                width += TopBarOuterWidth(element);
+            }
+        }
+        return width;
+    }
+
+    private static double TopBarOuterWidth(FrameworkElement element)
+    {
+        var width = element.Width;
+        if (!double.IsFinite(width) || width < 0)
+        {
+            width = element.ActualWidth;
+        }
+        if (!double.IsFinite(width) || width < 0)
+        {
+            width = element.MinWidth;
+        }
+        return Math.Max(0, width) +
+            element.Margin.Left +
+            element.Margin.Right;
+    }
+
+    private void ConfigureNoteLinkDragButton(Button button)
+    {
+        ConfigureTopBarDragGesture(
+            button,
+            new TopBarDragBehavior
+            {
+                Kind = TopBarDragKind.NoteLink,
+                CanBegin = () =>
+                    _controller.State.EnableTodoPaperLinks &&
+                    _paper.Type == PaperTypes.Note &&
+                    BodySupports(PaperBodyCapabilities.NoteLinks),
+                Started = () =>
+                {
+                    ExitNoteEditor();
+                    _controller.BeginPaperLinkDrag(_paper);
+                },
+                CreateFeedback = CreateNoteLinkDragFeedback,
+                Moved = (_, point) =>
+                    _controller.UpdatePaperLinkDrag(
+                        _paper,
+                        point.ToPoint()),
+                Completed = commit =>
+                    _controller.EndPaperLinkDrag(_paper, commit),
+                GhostPlacement = TopBarDragGhostPlacement.Centered,
+                DraggingOpacity = 0.82
+            });
+    }
+
+    private TopBarDragFeedback CreateNoteLinkDragFeedback()
+    {
+        var stack = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false
+        };
+
+        stack.Children.Add(new TextBlock
+        {
+            Text = "✎",
+            Foreground = TextBrush,
+            FontFamily = AppTypography.SymbolFontFamily,
+            FontSize = AppTypography.Scale(13),
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        stack.Children.Add(new TextBlock
+        {
+            Text = _controller.PaperCapsuleTitle(_paper),
+            Foreground = TextBrush,
+            FontFamily = AppTypography.UiFontFamily,
+            FontSize = AppTypography.Scale(12),
+            Margin = new Thickness(6, 0, 0, 0),
+            MaxWidth = 150,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        var root = new Border
+        {
+            Padding = new Thickness(9, 5, 10, 5),
+            CornerRadius = new CornerRadius(RadiusControl),
+            Background = PaperBrush,
+            BorderBrush = PaperLinkTargetBorderBrush,
+            BorderThickness = new Thickness(1),
+            Opacity = 0.86,
+            Child = stack,
+            IsHitTestVisible = false,
+            Effect = new DropShadowEffect
+            {
+                BlurRadius = 16,
+                ShadowDepth = 2,
+                Opacity = 0.22
+            }
+        };
+
+        return new TopBarDragFeedback(
+            CreateTopBarDragFeedbackWindow(root));
+    }
+
+    private void BuildBody()
+    {
+        UIElement body = _paper.Type == PaperTypes.Note
+            ? CreateAndAttachInitialPaperBody()
+            : BuildTodoBody();
+        Grid.SetRow(body, 1);
+        _shell.Children.Add(body);
+
+        if (_paper.Type == PaperTypes.Note)
+        {
+            NotifyCurrentPaperBodyVisibility(
+                _paper.IsVisible &&
+                !_paper.IsCollapsed &&
+                WindowState != WindowState.Minimized);
+            RefreshPaperBodyChrome();
+        }
+    }
+
+    private void BuildTextZoomOverlay()
+    {
+        var zoomHost = new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 12, 7),
+            Padding = new Thickness(6, 1, 6, 1),
+            CornerRadius = new CornerRadius(RadiusControl),
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            ToolTip = Strings.Get("ToolTipResetTextZoom"),
+            Visibility = Visibility.Collapsed
+        };
+
+        _textZoomIndicator = new TextBlock
+        {
+            Foreground = WeakTextBrush,
+            FontSize = AppTypography.Scale(10.5),
+            FontWeight = FontWeights.SemiBold,
+            Opacity = 0.55,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        zoomHost.Child = _textZoomIndicator;
+        zoomHost.MouseEnter += (_, _) =>
+        {
+            zoomHost.Background = HoverBrush;
+            _textZoomIndicator.Foreground = TextBrush;
+            _textZoomIndicator.Opacity = 1.0;
+        };
+        zoomHost.MouseLeave += (_, _) =>
+        {
+            zoomHost.Background = Brushes.Transparent;
+            _textZoomIndicator.Foreground = WeakTextBrush;
+            _textZoomIndicator.Opacity = 0.55;
+        };
+        zoomHost.MouseLeftButtonUp += (_, e) =>
+        {
+            _controller.SetPaperTextZoom(_paper, 1.0);
+            e.Handled = true;
+        };
+
+        Grid.SetRow(zoomHost, 1);
+        Panel.SetZIndex(zoomHost, 20);
+        _shell.Children.Add(zoomHost);
+    }
+
+    private ContextMenu BuildPaperContextMenu(bool forDeepCapsuleSlot = false)
+    {
+        var menu = CreateContextMenu();
+
+        menu.Items.Add(MenuHeader(Strings.Get("MenuQuick")));
+        menu.Items.Add(MenuItem(Strings.Get("MenuNewTodoPaper"), (_, _) => _controller.CreatePaper(PaperTypes.Todo, show: true, _paper)));
+        menu.Items.Add(MenuItem(Strings.Get("MenuNewNotePaper"), (_, _) => _controller.CreatePaper(PaperTypes.Note, show: true, _paper)));
+        menu.Items.Add(MenuItem(Strings.Get("TraySettings"), (_, _) => _controller.OpenSettingsWindow()));
+
+        menu.Items.Add(MenuSeparator());
+        menu.Items.Add(MenuHeader(_controller.PaperCapsuleTitle(_paper)));
+
+        if (_paper.Type == PaperTypes.Todo)
+        {
+            menu.Items.Add(MenuItem(Strings.Get("MenuClearDone"), (_, _) => ClearDoneItems()));
+        }
+        else if (_paper.Type == PaperTypes.Note)
+        {
+            menu.Items.Add(BuildPaperBodyProviderMenuItem());
+            if (IsCurrentBodyProviderMarkdown)
+            {
+                menu.Items.Add(MenuItem(
+                    OpenMarkdownEditorToolTip(),
+                    (_, _) => OpenMarkdownInDefaultEditor()));
+            }
+        }
+
+        AttachPluginPaperMenuActions(menu);
+
+        if (CanDisplayAsCapsule())
+        {
+            menu.Items.Add(_paper.IsCollapsed
+                ? MenuItem(Strings.Get("MenuRestoreWindow"), (_, _) => OpenCapsuleForEditing())
+                : MenuItem(Strings.Get("MenuCollapseToCapsule"), (_, _) => SetCollapsedState(true)));
+        }
+
+        if (HasExperimentalCapsuleMagnet)
+        {
+            menu.Items.Add(MenuItem(
+                Strings.Get("LabsCapsuleMagnetDetach"),
+                (_, _) => DetachExperimentalWindowAttachment(savePosition: true)));
+        }
+
+        if (HasExperimentalWindowTether)
+        {
+            menu.Items.Add(MenuItem(
+                Strings.Get("LabsWindowTetherDetach"),
+                (_, _) => DetachExperimentalWindowAttachment(savePosition: true)));
+        }
+
+        menu.Items.Add(MenuItem(Strings.Get("MenuHide"), (_, _) => _controller.HidePaper(_paper)));
+        menu.Items.Add(MenuItem(
+            Strings.Get("MenuDelete"),
+            (_, _) => DeletePaperFromPaperMenu(),
+            isDanger: true));
+
+        return menu;
+    }
+
+    private void ToggleTopmost()
+    {
+        _paper.AlwaysOnTop = !_paper.AlwaysOnTop;
+        RefreshEffectiveTopmost();
+        RefreshPaperIconButton();
+        _controller.MarkDirty();
+    }
+
+    internal void RefreshEffectiveTopmost()
+    {
+        var shouldBeTopmost = !IsExperimentalPassive &&
+            (_paper.AlwaysOnTop ||
+             (_controller.State.UseCapsuleMode &&
+              _paper.IsCollapsed &&
+              !UsesNonPaperGeometry));
+        var fullscreenAvoidanceWindow =
+            _controller.FullscreenAvoidanceWindowFor(this);
+        var avoidanceWindow = ResolveExperimentalCapsuleFollowZOrderTarget(
+            fullscreenAvoidanceWindow);
+        _mainWindowFullscreenAvoidanceWindow =
+            fullscreenAvoidanceWindow;
+        var effectiveTopmost = shouldBeTopmost &&
+            (avoidanceWindow == IntPtr.Zero ||
+             ShouldKeepExperimentalCapsuleFollowAboveTarget);
+        Topmost = effectiveTopmost;
+        if (IsExperimentalPassive && IsVisible)
+        {
+            WindowNative.ApplyBottomZOrder(this);
+        }
+        else if (IsVisible &&
+            (_experimentalPassiveNeedsZOrderRestore ||
+             shouldBeTopmost ||
+             WindowNative.IsTopmost(this)))
+        {
+            WindowNative.ApplyTopmostZOrder(this, effectiveTopmost, avoidanceWindow);
+            _experimentalPassiveNeedsZOrderRestore = false;
+        }
+        if (_experimentalTetherCapsule is { } tetherCapsule)
+        {
+            tetherCapsule.SetFullscreenAvoidance(
+                _controller.FullscreenAvoidanceWindowFor(tetherCapsule));
+        }
+
+        RefreshDeepCapsuleSlotTopmost();
+        RefreshTopBarDragFeedbackTopmost();
+    }
+
+    internal void RefreshDeepCapsuleSlotTopmost()
+    {
+        var queueAvoidanceWindow = _controller.FullscreenAvoidanceWindowForQueue(
+            _paper.CapsuleMonitorDeviceName);
+        var slotShouldBeTopmost =
+            !_controller.State.ExperimentalDockedCapsulesNonTopmost &&
+            !_controller.SuppressDeepCapsuleTopmostForContextMenu &&
+            queueAvoidanceWindow == IntPtr.Zero;
+        // The transient proxy captures z-order at creation. Settle it only when that contract is
+        // actually changing; ordinary placement refreshes run during A-to-B staging and must leave
+        // the current cover available for successor promotion.
+        if (_edgeCapsuleHost?.WouldChangeZOrder(
+                slotShouldBeTopmost,
+                queueAvoidanceWindow) == true)
+        {
+            _controller.CompleteEdgeCapsuleQueueCompositionProxyFor(
+                this,
+                success: true);
+        }
+        _edgeCapsuleHost?.SetTopmost(
+            slotShouldBeTopmost,
+            queueAvoidanceWindow);
+
+        if (_deepCapsuleFloatingDragHost is { } floatingHost)
+        {
+            var floatingAvoidanceWindow = _controller.FullscreenAvoidanceWindowFor(floatingHost);
+            _deepCapsuleFloatingFullscreenAvoidanceWindow = floatingAvoidanceWindow;
+            var floatingShouldBeTopmost = !_controller.SuppressDeepCapsuleTopmostForContextMenu &&
+                floatingAvoidanceWindow == IntPtr.Zero;
+            floatingHost.Topmost = floatingShouldBeTopmost;
+            if (floatingHost.IsVisible)
+            {
+                WindowNative.ApplyTopmostZOrder(
+                    floatingHost,
+                    floatingShouldBeTopmost,
+                    floatingAvoidanceWindow);
+            }
+        }
+    }
+
+    private void RefreshPaperIconButton()
+    {
+        if (_paperIconButton == null)
+        {
+            return;
+        }
+
+        _paperIconButton.ToolTip = _paper.AlwaysOnTop ? Strings.Get("Unpin") : Strings.Get("Pin");
+        _paperIconButton.Content = CreateTopmostPinIcon(_paperIconButton, _paper.AlwaysOnTop);
+        _paperIconButton.Opacity = 1.0;
+        _paperIconButton.Foreground = _paper.AlwaysOnTop ? Theme.ActiveBrush : WeakTextBrush;
+    }
+
+    public void RefreshPaperTitle() => RefreshPaperTitle(invalidatePreview: true);
+
+    private void RefreshPaperTitle(bool invalidatePreview)
+    {
+        var title = _controller.PaperDisplayTitle(_paper);
+        Title = title;
+
+        if (_titleText != null)
+        {
+            _titleText.Text = title;
+            _titleText.ToolTip = Strings.Get("ToolTipEditTitle");
+            _titleText.Foreground = TextBrush;
+        }
+
+        if (_titleEditBox != null)
+        {
+            _titleEditBox.Foreground = TextBrush;
+            _titleEditBox.CaretBrush = TextBrush;
+        }
+
+        RefreshCapsuleLabel(invalidatePreview);
+        RefreshPaperContextMenus();
+    }
+
+    private void BeginTitleEdit()
+    {
+        if (_windowLifecycle != PaperWindowLifecycleState.Alive ||
+            !_paper.IsVisible ||
+            _titleText == null ||
+            _titleEditBox == null)
+        {
+            return;
+        }
+
+        if (_isEditingTitle)
+        {
+            _titleEditBox.Focus();
+            return;
+        }
+
+        if (!CanBeginTitleEditNow())
+        {
+            QueueTitleEditAfterWindowIsExpanded();
+            return;
+        }
+
+        ExitNoteEditor();
+        _isEditingTitle = true;
+        _titleEditBox.Text = _controller.PaperTitleText(_paper);
+        _titleText.Visibility = Visibility.Collapsed;
+        _titleEditBox.Visibility = Visibility.Visible;
+        _titleEditBox.Focus();
+        _titleEditBox.SelectAll();
+    }
+
+    private bool IsTitleEditBoxEventSource(DependencyObject? source)
+    {
+        return _titleEditBox != null && IsDescendantOf(source, _titleEditBox);
+    }
+
+    private void CommitTitleEdit()
+    {
+        EndTitleEdit(commit: true);
+    }
+
+    private void EndTitleEdit(bool commit)
+    {
+        if (_titleText == null || _titleEditBox == null)
+        {
+            return;
+        }
+
+        if (!_isEditingTitle)
+        {
+            return;
+        }
+
+        var editedTitle = _titleEditBox.Text;
+        _isEditingTitle = false;
+        _titleEditBox.Visibility = Visibility.Collapsed;
+        _titleText.Visibility = Visibility.Visible;
+
+        if (commit)
+        {
+            _controller.UpdatePaperTitle(_paper, editedTitle);
+        }
+        else
+        {
+            RefreshPaperTitle();
+        }
+    }
+
+    private bool CanBeginTitleEditNow()
+    {
+        return IsVisible &&
+            !_paper.IsCollapsed &&
+            !IsPaperFormTransitioning &&
+            Width > DesiredCapsuleWindowWidth + 8 &&
+            Height > PaperLayoutDefaults.CapsuleHeight + 8;
+    }
+
+    private void QueueTitleEditAfterWindowIsExpanded()
+    {
+        if (_windowLifecycle != PaperWindowLifecycleState.Alive || !_paper.IsVisible)
+        {
+            return;
+        }
+
+        var generation = ++_titleEditIntentGeneration;
+        if (_paper.IsCollapsed)
+        {
+            ExpandForProgrammaticOpen();
+        }
+        else
+        {
+            EnsureExpandedSurfaceGeometry(alignToDockedEdge: true);
+        }
+
+        var delay = Math.Max(ExpandAnimationMilliseconds, CollapseResizeMilliseconds) + 30;
+        var timer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(delay)
+        };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            if (generation != _titleEditIntentGeneration ||
+                _windowLifecycle != PaperWindowLifecycleState.Alive ||
+                IsClosed ||
+                !_paper.IsVisible ||
+                !CanBeginTitleEditNow())
+            {
+                return;
+            }
+
+            Dispatcher.BeginInvoke(
+                (Action)(() =>
+                {
+                    if (generation == _titleEditIntentGeneration &&
+                        _windowLifecycle == PaperWindowLifecycleState.Alive &&
+                        _paper.IsVisible &&
+                        CanBeginTitleEditNow())
+                    {
+                        BeginTitleEdit();
+                    }
+                }),
+                System.Windows.Threading.DispatcherPriority.Input);
+        };
+        timer.Start();
+    }
+
+    public void UpdateTopBarNewPaperButtons()
+    {
+        if (_newTodoButton != null)
+        {
+            _newTodoButton.Visibility =
+                _controller.State.ShowTopBarNewTodoButton
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+        }
+        if (_newNoteButton != null)
+        {
+            _newNoteButton.Visibility =
+                _controller.State.ShowTopBarNewNoteButton
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+        }
+        if (_openMarkdownButton != null)
+        {
+            _openMarkdownButton.Visibility =
+                _controller.State.ShowTopBarExternalOpenButton &&
+                IsCurrentBodyProviderMarkdown
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+        }
+
+        UpdateTopBarResponsiveLayout();
+    }
+
+    private void ConfirmAndDeletePaper()
+    {
+        if (ShowDeletePaperDialog())
+        {
+            _controller.DeletePaper(_paper);
+        }
+    }
+
+    private void DeletePaperFromPaperMenu()
+    {
+        if ((_paper.Type != PaperTypes.Note || IsCurrentBodyProviderMarkdown) &&
+            _controller.IsPaperEmpty(_paper))
+        {
+            _controller.DeletePaper(_paper);
+            return;
+        }
+
+        ConfirmAndDeletePaper();
+    }
+
+    private bool ShowDeletePaperDialog()
+    {
+        // A startup-restored deep capsule may have a built shell but no shown PaperWindow.
+        var canOwnDialog = IsVisible && PresentationSource.FromVisual(this) is HwndSource;
+
+        var dialog = new Window
+        {
+            Title = Strings.Get("DeletePaperTitle"),
+            Width = 300,
+            Height = 178,
+            MinWidth = 300,
+            MinHeight = 178,
+            WindowStartupLocation = canOwnDialog
+                ? WindowStartupLocation.CenterOwner
+                : WindowStartupLocation.CenterScreen,
+            WindowStyle = WindowStyle.None,
+            ResizeMode = ResizeMode.NoResize,
+            AllowsTransparency = true,
+            Background = Brushes.Transparent,
+            ShowInTaskbar = false,
+            Topmost = Topmost
+        };
+        if (canOwnDialog)
+        {
+            dialog.Owner = this;
+        }
+
+        AppTypography.ApplyTextRendering(dialog);
+
+        var root = new Border
+        {
+            CornerRadius = new CornerRadius(RadiusShell),
+            BorderBrush = PaperBorderBrush,
+            BorderThickness = new Thickness(1),
+            Background = PaperBrush,
+            Padding = new Thickness(18),
+            Effect = new DropShadowEffect
+            {
+                BlurRadius = 18,
+                ShadowDepth = 2,
+                Opacity = 0.22
+            }
+        };
+
+        var layout = new Grid();
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var title = new TextBlock
+        {
+            Text = Strings.Get("DeletePaperQuestion"),
+            Foreground = TextBrush,
+            FontSize = AppTypography.Scale(16),
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+
+        var message = new TextBlock
+        {
+            Text = Strings.Get("DeletePaperBody"),
+            Foreground = WeakTextBrush,
+            FontSize = AppTypography.Scale(13),
+            TextWrapping = TextWrapping.Wrap,
+            LineHeight = 20,
+            Margin = new Thickness(0, 2, 0, 0)
+        };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 16, 0, 0)
+        };
+
+        var delete = DialogButton(Strings.Get("MenuDelete"), isDanger: true);
+        delete.Click += (_, _) => dialog.DialogResult = true;
+
+        buttons.Children.Add(delete);
+
+        var cancel = DialogButton(Strings.Get("CommonCancel"), isDanger: false);
+        cancel.IsCancel = true;
+        cancel.Margin = new Thickness(8, 0, 0, 0);
+        cancel.Click += (_, _) => dialog.DialogResult = false;
+
+        buttons.Children.Add(cancel);
+
+        Grid.SetRow(title, 0);
+        Grid.SetRow(message, 1);
+        Grid.SetRow(buttons, 2);
+
+        layout.Children.Add(title);
+        layout.Children.Add(message);
+        layout.Children.Add(buttons);
+
+        root.Child = layout;
+        dialog.Content = root;
+
+        return dialog.ShowDialog() == true;
+    }
+
+    private static Button DialogButton(string text, bool isDanger)
+    {
+        var background = isDanger
+            ? Theme.DangerBrush
+            : Theme.Tint(28);
+
+        var foreground = isDanger ? PaperBrush : TextBrush;
+        var hover = isDanger
+            ? Theme.DangerHoverBrush
+            : Theme.Tint(46);
+
+        var style = new Style(typeof(Button));
+        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(16, 7, 16, 7)));
+        style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, background));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, foreground));
+        style.Setters.Add(new Setter(Control.FontSizeProperty, AppTypography.Scale(13)));
+        style.Setters.Add(new Setter(Control.CursorProperty, Cursors.Hand));
+        style.Setters.Add(new Setter(FrameworkElement.MinWidthProperty, 72.0));
+
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.Name = "Bd";
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(RadiusControl));
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
+
+        var content = new FrameworkElementFactory(typeof(ContentPresenter));
+        content.SetValue(ContentPresenter.ContentProperty, new TemplateBindingExtension(ContentControl.ContentProperty));
+        content.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        content.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(content);
+
+        var template = new ControlTemplate(typeof(Button))
+        {
+            VisualTree = border
+        };
+
+        var mouseOver = new Trigger
+        {
+            Property = UIElement.IsMouseOverProperty,
+            Value = true
+        };
+        mouseOver.Setters.Add(new Setter(Control.BackgroundProperty, hover));
+
+        var pressed = new Trigger
+        {
+            Property = ButtonBase.IsPressedProperty,
+            Value = true
+        };
+        pressed.Setters.Add(new Setter(UIElement.OpacityProperty, 0.82));
+
+        template.Triggers.Add(mouseOver);
+        template.Triggers.Add(pressed);
+        style.Setters.Add(new Setter(Control.TemplateProperty, template));
+
+        return new Button
+        {
+            Content = text,
+            Style = style
+        };
+    }
+
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        EndTopBarDragGesture(commit: false);
+        if (_windowLifecycle != PaperWindowLifecycleState.Alive)
+        {
+            WindowNative.DetachAndReleaseWindowSwitcherOwner(this, ref _windowSwitcherHiddenOwner);
+            _windowSwitcherHiddenOwnerApplied = false;
+            CloseExpandedDeepCapsuleSlotHostForReal();
+            return;
+        }
+
+        e.Cancel = true;
+        _controller.HidePaper(_paper);
+    }
+
+    private void OnLostMouseCapture(object sender, MouseEventArgs e)
+    {
+        if (_todoDrag != null && Mouse.LeftButton != MouseButtonState.Pressed)
+        {
+            EndTodoMouseDrag(commit: false);
+        }
+    }
+
+    private static DependencyObject? GetSafeParent(DependencyObject current)
+    {
+        if (current is Visual || current is System.Windows.Media.Media3D.Visual3D)
+        {
+            return VisualTreeHelper.GetParent(current);
+        }
+
+        if (current is FrameworkContentElement fce)
+        {
+            return fce.Parent;
+        }
+
+        if (current is ContentElement ce)
+        {
+            return ContentOperations.GetParent(ce);
+        }
+
+        return null;
+    }
+
+    private static Button IconButton(string text, string tooltip)
+    {
+        return new Button
+        {
+            Content = text,
+            ToolTip = tooltip,
+            Width = 28,
+            Height = 24,
+            Margin = new Thickness(1, 0, 1, 0),
+            Style = BuildIconButtonStyle()
+        };
+    }
+
+    private static FrameworkElement CreateTopmostPinIcon(Button owner, bool pinned)
+    {
+        var canvas = new Canvas
+        {
+            Width = 24,
+            Height = 24,
+            SnapsToDevicePixels = true
+        };
+
+        if (pinned)
+        {
+            var head = new WpfPath
+            {
+                Data = Geometry.Parse(PinOutlineHeadPathData),
+                StrokeThickness = 2.15,
+                StrokeLineJoin = PenLineJoin.Round,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                SnapsToDevicePixels = true
+            };
+            head.SetBinding(System.Windows.Shapes.Shape.FillProperty, CreateForegroundBinding(owner));
+            head.SetBinding(System.Windows.Shapes.Shape.StrokeProperty, CreateForegroundBinding(owner));
+            canvas.Children.Add(head);
+
+            var needle = new WpfPath
+            {
+                Data = Geometry.Parse(PinNeedlePathData),
+                SnapsToDevicePixels = true
+            };
+            needle.SetBinding(System.Windows.Shapes.Shape.FillProperty, CreateForegroundBinding(owner));
+            canvas.Children.Add(needle);
+        }
+        else
+        {
+            var head = new WpfPath
+            {
+                Data = Geometry.Parse(PinOutlineHeadPathData),
+                StrokeThickness = 2.15,
+                StrokeLineJoin = PenLineJoin.Round,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                SnapsToDevicePixels = true
+            };
+            head.SetBinding(System.Windows.Shapes.Shape.StrokeProperty, CreateForegroundBinding(owner));
+            canvas.Children.Add(head);
+
+            var needle = new WpfPath
+            {
+                Data = Geometry.Parse(PinNeedlePathData),
+                SnapsToDevicePixels = true
+            };
+            needle.SetBinding(System.Windows.Shapes.Shape.FillProperty, CreateForegroundBinding(owner));
+            canvas.Children.Add(needle);
+        }
+
+        return new Viewbox
+        {
+            Width = 14,
+            Height = 14,
+            Stretch = Stretch.Uniform,
+            Child = canvas
+        };
+    }
+
+    private static System.Windows.Data.Binding CreateForegroundBinding(Button owner)
+    {
+        return new System.Windows.Data.Binding(nameof(Control.Foreground))
+        {
+            Source = owner
+        };
+    }
+
+    private ContextMenu CreateContextMenu()
+    {
+        var menu = new ContextMenu
+        {
+            Padding = new Thickness(4, 4, 4, 4),
+            FontFamily = AppTypography.UiFontFamily,
+            Language = AppTypography.Language,
+            FontSize = AppTypography.Scale(13),
+            HasDropShadow = true,
+            Template = SharedContextMenuTemplate
+        };
+        AppTypography.ApplyTextRendering(menu);
+        UpdateContextMenuTheme(menu);
+        menu.Opened += (_, _) =>
+        {
+            if (_controller.State.Theme == "system")
+            {
+                Theme.Invalidate();
+            }
+
+            UpdateContextMenuTheme(menu);
+            RefreshExperimentalOpacity();
+        };
+        menu.Closed += (_, _) => Dispatcher.BeginInvoke(
+            (Action)(() =>
+            {
+                RefreshExperimentalOpacity();
+                FlushPendingPaperContextMenuRefresh();
+            }),
+            System.Windows.Threading.DispatcherPriority.Background);
+
+        menu.Resources.Add(typeof(MenuItem), SharedCompactMenuItemStyle);
+        RegisterThemedContextMenu(menu);
+        return menu;
+    }
+
+    private bool IsPaperContextMenuInteractionActive =>
+        _paperContextMenuOpening || HasOpenOwnedContextMenu();
+
+    private void BeginPaperContextMenuOpening()
+    {
+        _paperContextMenuOpening = true;
+        var version = ++_paperContextMenuOpeningVersion;
+        Dispatcher.BeginInvoke(
+            (Action)(() =>
+            {
+                if (version != _paperContextMenuOpeningVersion)
+                {
+                    return;
+                }
+
+                _paperContextMenuOpening = false;
+                FlushPendingPaperContextMenuRefresh();
+            }),
+            System.Windows.Threading.DispatcherPriority.ContextIdle);
+    }
+
+    private void RegisterThemedContextMenu(ContextMenu menu)
+    {
+        for (var i = _themedContextMenus.Count - 1; i >= 0; i--)
+        {
+            if (!_themedContextMenus[i].TryGetTarget(out _))
+            {
+                _themedContextMenus.RemoveAt(i);
+            }
+        }
+
+        _themedContextMenus.Add(new WeakReference<ContextMenu>(menu));
+    }
+
+    private void RefreshThemedContextMenus()
+    {
+        for (var i = _themedContextMenus.Count - 1; i >= 0; i--)
+        {
+            if (_themedContextMenus[i].TryGetTarget(out var menu))
+            {
+                UpdateContextMenuTheme(menu);
+                RefreshContextMenuTypography(menu);
+            }
+            else
+            {
+                _themedContextMenus.RemoveAt(i);
+            }
+        }
+    }
+
+    private static void RefreshContextMenuTypography(ContextMenu menu)
+    {
+        menu.Resources[typeof(MenuItem)] = SharedCompactMenuItemStyle;
+        menu.FontFamily = AppTypography.UiFontFamily;
+        menu.FontSize = AppTypography.Scale(13);
+        menu.Language = AppTypography.Language;
+        AppTypography.ApplyTextRendering(menu);
+        foreach (var header in menu.Items.OfType<MenuItem>().Where(item => !item.IsEnabled))
+        {
+            header.FontSize = AppTypography.Scale(12);
+        }
+    }
+
+    private static void UpdateContextMenuTheme(ContextMenu menu)
+    {
+        menu.Resources["PaperBrushKey"] = PaperBrush;
+        menu.Resources["PaperBorderBrushKey"] = PaperBorderBrush;
+        menu.Resources["TextBrushKey"] = TextBrush;
+        menu.Resources["WeakTextBrushKey"] = WeakTextBrush;
+        menu.Resources["HoverBrushKey"] = HoverBrush;
+        menu.Resources["MenuHoverBrushKey"] = MenuHoverBrush;
+        menu.Resources["DangerTextBrushKey"] = TrashTextBrush;
+        menu.Background = PaperBrush;
+        menu.BorderBrush = PaperBorderBrush;
+        menu.Foreground = TextBrush;
+    }
+
+    private static Separator MenuSeparator()
+    {
+        return new Separator
+        {
+            Margin = new Thickness(8, 3, 8, 3),
+            Opacity = 0.38
+        };
+    }
+
+    private static MenuItem MenuHeader(string header)
+    {
+        var item = new MenuItem
+        {
+            Header = header,
+            IsEnabled = false,
+            Padding = new Thickness(8, 2, 10, 2),
+            Background = Brushes.Transparent,
+            FontSize = AppTypography.Scale(12),
+            FontWeight = FontWeights.SemiBold
+        };
+        item.SetResourceReference(Control.ForegroundProperty, "WeakTextBrushKey");
+        return item;
+    }
+
+    private static MenuItem MenuItem(
+        string header,
+        RoutedEventHandler click,
+        bool isDanger = false)
+    {
+        var item = new MenuItem
+        {
+            Header = header,
+            Padding = new Thickness(8, 4, 10, 4),
+            Background = Brushes.Transparent
+        };
+        item.SetResourceReference(
+            Control.ForegroundProperty,
+            isDanger ? "DangerTextBrushKey" : "TextBrushKey");
+        item.Click += click;
+        return item;
+    }
+
+    public static readonly DependencyProperty TransitionProgressProperty =
+        DependencyProperty.Register(
+            nameof(TransitionProgress),
+            typeof(double),
+            typeof(PaperWindow),
+            new PropertyMetadata(0.0, OnTransitionProgressChanged));
+
+    public double TransitionProgress
+    {
+        get => (double)GetValue(TransitionProgressProperty);
+        set => SetValue(TransitionProgressProperty, value);
+    }
+
+    private static void OnTransitionProgressChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    {
+        if (d is PaperWindow window)
+        {
+            window.UpdateTransitionVisuals((double)e.NewValue);
+        }
+    }
+
+    private void UpdateTransitionVisuals(double progress)
+    {
+        if (!IsPaperFormTransitioning)
+        {
+            return;
+        }
+
+        var currentProgress = double.IsNaN(progress) || double.IsInfinity(progress)
+            ? 0.0
+            : Math.Clamp(progress, 0.0, 1.0);
+
+        var visualWidth = _startTransitionWidth + (_targetTransitionWidth - _startTransitionWidth) * currentProgress;
+        var visualHeight = _startTransitionHeight + (_targetTransitionHeight - _startTransitionHeight) * currentProgress;
+        var visualChromeWidth = Math.Max(1.0, visualWidth - WindowChromeInset);
+        var visualChromeHeight = Math.Max(1.0, visualHeight - WindowChromeInset);
+        var baseChromeWidth = Math.Max(1.0, _transitionBaseWidth - WindowChromeInset);
+        var baseChromeHeight = Math.Max(1.0, _transitionBaseHeight - WindowChromeInset);
+
+        _paperChrome.HorizontalAlignment = HorizontalAlignment.Left;
+        _paperChrome.VerticalAlignment = VerticalAlignment.Top;
+        _paperChrome.Width = visualChromeWidth;
+        _paperChrome.Height = visualChromeHeight;
+        _shellScale.ScaleX = Math.Max(0.01, visualChromeWidth / baseChromeWidth);
+        _shellScale.ScaleY = Math.Max(0.01, visualChromeHeight / baseChromeHeight);
+        UpdateTransitionCornerRadius(visualChromeWidth, visualChromeHeight, baseChromeWidth, baseChromeHeight);
+    }
+
+    private void ResetTransitionVisuals()
+    {
+        _paperChrome.Width = double.NaN;
+        _paperChrome.Height = double.NaN;
+        _paperChrome.HorizontalAlignment = HorizontalAlignment.Stretch;
+        _paperChrome.VerticalAlignment = VerticalAlignment.Stretch;
+        _shellScale.ScaleX = 1.0;
+        _shellScale.ScaleY = 1.0;
+        // Restore the full chrome presentation (corner radius, margin, shadow) for the
+        // current form + snap state instead of just the corner radius.
+        ApplyPaperChromePresentation();
+    }
+
+    private void UpdateTransitionCornerRadius(
+        double visualChromeWidth,
+        double visualChromeHeight,
+        double baseChromeWidth,
+        double baseChromeHeight)
+    {
+        var visualChromeMin = Math.Min(visualChromeWidth, visualChromeHeight);
+        var expandedChromeMin = Math.Max(1.0, Math.Min(baseChromeWidth, baseChromeHeight));
+        var capsuleChromeMin = Math.Max(
+            1.0,
+            Math.Min(
+                PaperLayoutDefaults.CapsuleWidth - WindowChromeInset,
+                PaperLayoutDefaults.CapsuleHeight - WindowChromeInset));
+        var compactRange = Math.Max(1.0, expandedChromeMin - capsuleChromeMin);
+        var compactness = Math.Clamp((expandedChromeMin - visualChromeMin) / compactRange, 0.0, 1.0);
+        var compactVisualRadius = Math.Min(CapsuleChromeCornerRadius, visualChromeMin / 2.0);
+        var desiredVisualRadius = ExpandedChromeCornerRadius + (compactVisualRadius - ExpandedChromeCornerRadius) * compactness;
+
+        _paperChrome.CornerRadius = new CornerRadius(desiredVisualRadius);
+    }
+
+    private static CornerRadius PaperChromeCornerRadiusForState(bool collapsed)
+    {
+        return new CornerRadius(collapsed ? CapsuleChromeCornerRadius : ExpandedChromeCornerRadius);
+    }
+
+    private double CapsuleWindowWidth()
+    {
+        return Math.Max(CapsuleNormalMinWidth, CapsuleShellWidth() + WindowChromeInset);
+    }
+
+    private double CapsuleShellWidth()
+    {
+        var pluginContentWidth = PluginCapsuleRequestedContentWidth();
+        if (pluginContentWidth.HasValue)
+        {
+            return Math.Ceiling(pluginContentWidth.Value + CapsuleNormalCloseWidth);
+        }
+
+        return Math.Ceiling(
+            CapsuleLeftPadding +
+            MeasureCapsuleIconWidth() +
+            CapsuleIconGap +
+            MeasureCapsuleTitleWidth() +
+            CapsuleNormalCloseWidth +
+            CapsuleRightPadding);
+    }
+
+    // The pill window clamps to a minimum width (CapsuleWidth), so for short titles the pill is
+    // wider than the raw content. The shell must always fill the pill interior, otherwise it is
+    // left-aligned inside the pill and the close button's rounded right corner floats off the
+    // pill's actual curve. Pill interior = window width minus the chrome margin on both sides.
+    private double CapsuleShellLayoutWidth()
+    {
+        return Math.Max(CapsuleShellWidth(), CapsuleWindowWidth() - WindowChromeInset);
+    }
+
+    private double MeasureCapsuleTitleWidth(bool limitForDeepCapsule = false, double? pixelsPerDip = null)
+    {
+        var title = _controller.PaperCapsuleTitle(_paper);
+        if (limitForDeepCapsule)
+        {
+            title = EdgeCapsuleTitleLimit.TextForMeasure(title, _controller.State.DeepCapsuleTitleMeasureCharacterLimit);
+        }
+
+        return MeasureCapsuleTextWidth(
+            title,
+            CapsuleLabelFontSize,
+            CapsuleLabelFontWeight,
+            CapsuleLabelFontFamily,
+            pixelsPerDip);
+    }
+
+    // The capsule icon glyph (✓ / ✎) is not a fixed box — its rendered advance width depends
+    // on the font and weight. Measure it with the same SemiBold weight it renders at.
+    private double MeasureCapsuleIconWidth(double? pixelsPerDip = null)
+    {
+        return MeasureCapsuleTextWidth(
+            CapsuleIconText(),
+            CapsuleIconFontSizeForCurrentPaper(),
+            FontWeights.SemiBold,
+            AppTypography.SymbolFontFamily,
+            pixelsPerDip);
+    }
+
+    // Single source of truth for "how wide does this text actually render". Uses the same
+    // font family and weight the capsule icon/label are bound to, so
+    // measurement and rendering never disagree — digits and halfwidth chars get their true
+    // advance width.
+    private double MeasureCapsuleTextWidth(
+        string text,
+        double fontSize,
+        FontWeight weight,
+        FontFamily fontFamily,
+        double? pixelsPerDip = null)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return 0;
+        }
+
+        try
+        {
+            var formatted = new FormattedText(
+                text,
+                UiLanguages.EffectiveUiCulture,
+                FlowDirection.LeftToRight,
+                new Typeface(fontFamily, FontStyles.Normal, weight, FontStretches.Normal),
+                fontSize,
+                WeakTextBrush,
+                null,
+                AppTypography.TextFormattingMode,
+                pixelsPerDip ?? VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            return formatted.WidthIncludingTrailingWhitespace;
+        }
+        catch
+        {
+            return text.Length * fontSize;
+        }
+    }
+
+    private double RoundToDevicePixelX(double value)
+    {
+        return RoundToDevicePixel(value, VisualTreeHelper.GetDpi(this).DpiScaleX);
+    }
+
+    private double RoundToDevicePixelY(double value)
+    {
+        return RoundToDevicePixel(value, VisualTreeHelper.GetDpi(this).DpiScaleY);
+    }
+
+    private static double RoundToDevicePixel(double value, double scale)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value) || scale <= 0)
+        {
+            return value;
+        }
+
+        return Math.Round(value * scale, MidpointRounding.AwayFromZero) / scale;
+    }
+
+    private void SaveGeometryIfAllowed()
+    {
+        if (IsPaperFormTransitioning || SuppressGeometrySave)
+        {
+            return;
+        }
+
+        if (_isSnappedPresentation && !_paper.IsCollapsed)
+        {
+            return;
+        }
+
+        _controller.UpdateGeometry(_paper, this);
+    }
+
+    internal void SaveGeometryForCurrentPresentation()
+    {
+        SaveGeometryIfAllowed();
+    }
+
+    internal void HideWithoutGeometrySave()
+    {
+        MoveWindowWithoutGeometrySave(Hide);
+    }
+
+    private void MoveWindowWithoutGeometrySave(Action move)
+    {
+        var wasSuppressing = _suppressGeometrySave;
+        _suppressGeometrySave = true;
+        try
+        {
+            move();
+        }
+        finally
+        {
+            _suppressGeometrySave = wasSuppressing;
+        }
+    }
+
+}

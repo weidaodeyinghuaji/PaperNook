@@ -1,0 +1,79 @@
+{
+  "kind": "web",
+  "id": "sample.topbar.web",
+  "name": "Top Bar 2.1 示例",
+  "description": "演示 Plugin Runtime Global 顶栏、Paper 顶栏、插件快捷键、自身纸片控制与 Workspace。",
+  "version": "1.0.0",
+  "apiVersion": "2.1",
+  "stateVersion": 1,
+  "entry": "web/index.html",
+  "capabilities": [
+    "runtime"
+  ],
+  "permissions": [
+    "papers.read"
+  ],
+  "settings": [
+    {
+      "id": "togglePaperShortcut",
+      "type": "shortcut",
+      "name": "显示 / 隐藏纸片",
+      "description": "由 PaperTodo 注册并执行 paper.toggle；纸片隐藏后仍然有效。",
+      "default": "Ctrl+Alt+Shift+U",
+      "shortcutAction": "paper.toggle",
+      "quick": true
+    },
+    {
+      "id": "runtimePingShortcut",
+      "type": "shortcut",
+      "name": "Plugin Runtime 示例动作",
+      "description": "自定义 action 会投递到 plugin runtime，而不是 body session。",
+      "default": "",
+      "shortcutAction": "runtime.ping"
+    }
+  ],
+  "locales": {
+    "en-US": {
+      "name": "Top Bar 2.1 Sample",
+      "description": "Demonstrates global and paper top-bar actions, plugin shortcuts, own-paper controls, and Workspace access.",
+      "settings": {
+        "togglePaperShortcut": {
+          "name": "Show / hide paper",
+          "description": "Registered and executed by PaperTodo as paper.toggle; it remains active while the paper is hidden."
+        },
+        "runtimePingShortcut": {
+          "name": "Plugin Runtime sample action",
+          "description": "Delivers the custom action to the plugin runtime instead of the body session."
+        }
+      }
+    },
+    "ja-JP": {
+      "name": "トップバー 2.1 サンプル",
+      "description": "グローバルと紙ごとのトップバー、プラグインショートカット、紙の操作、Workspace を実演します。",
+      "settings": {
+        "togglePaperShortcut": {
+          "name": "紙を表示 / 非表示",
+          "description": "PaperTodo が paper.toggle として登録・実行し、紙を非表示にしても有効です。"
+        },
+        "runtimePingShortcut": {
+          "name": "Plugin Runtime サンプル操作",
+          "description": "カスタム操作を body session ではなく plugin runtime に送ります。"
+        }
+      }
+    },
+    "ko-KR": {
+      "name": "Top Bar 2.1 예제",
+      "description": "전역 및 메모별 상단 바, 플러그인 단축키, 메모 제어, Workspace 접근을 보여 줍니다.",
+      "settings": {
+        "togglePaperShortcut": {
+          "name": "메모 표시 / 숨기기",
+          "description": "PaperTodo가 paper.toggle로 등록하고 실행하며, 메모를 숨긴 뒤에도 계속 동작합니다."
+        },
+        "runtimePingShortcut": {
+          "name": "Plugin Runtime 예제 동작",
+          "description": "사용자 정의 동작을 body session이 아니라 plugin runtime으로 전달합니다."
+        }
+      }
+    }
+  }
+}

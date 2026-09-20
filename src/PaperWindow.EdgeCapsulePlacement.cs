@@ -1,0 +1,381 @@
+namespace PaperTodo;
+
+public sealed partial class PaperWindow
+{
+    private double DeepCapsuleTopForIndex(int index)
+    {
+        return MyTopForIndex(index, _edgeCapsule.Placement.SlotCount);
+    }
+
+    private double DeepCapsuleVisibleWidth()
+    {
+        return DeepCapsuleVisibleWidth(DeepCapsuleSlotDpi().PixelsPerDip);
+    }
+
+    private double DeepCapsuleVisibleWidth(double pixelsPerDip, bool limitTitle = true)
+    {
+        var pluginContentWidth = PluginCapsuleRequestedContentWidth(pixelsPerDip);
+        if (pluginContentWidth.HasValue)
+        {
+            return Math.Max(34, Math.Ceiling(pluginContentWidth.Value + WindowChromeMargin));
+        }
+
+        // A resting edge tag owns exactly the pixels it renders: one interior shadow margin plus
+        // icon/title content and its padding. Todo/Note use one shared icon slot so the different
+        // `✓` / `✎` glyph advances cannot change the pill width for otherwise equal titles.
+        var bodyWidth = Math.Ceiling(
+            CapsuleLeftPadding +
+            MeasureDeepCapsuleIconSlotWidth(pixelsPerDip) +
+            CapsuleIconGap +
+            MeasureCapsuleTitleWidth(
+                limitForDeepCapsule: limitTitle,
+                pixelsPerDip: pixelsPerDip) +
+            CapsuleRightPadding);
+        return Math.Max(34, bodyWidth + WindowChromeMargin);
+    }
+
+    private double ExpandedDeepCapsuleVisibleWidth()
+    {
+        return DeepCapsuleExpandedBodyWidth(DeepCapsuleMonitorGeometry()) + CapsuleCloseWidth;
+    }
+
+    private double DeepCapsuleExpandedBodyWidth(MonitorGeometry monitor, double? restingWidth = null)
+    {
+        var resting = restingWidth ?? DeepCapsuleVisibleWidth(monitor.DpiScaleY);
+        if (_controller.State.ExperimentalEdgeCapsuleHoverPreview ||
+            _controller.State.DeepCapsuleTitleMeasureCharacterLimit == EdgeCapsuleTitleLimit.Unlimited)
+        {
+            return resting;
+        }
+
+        // Only the ordinary text capsule grows. Plugin-requested content retains its own width.
+        var full = DeepCapsuleVisibleWidth(monitor.DpiScaleY, limitTitle: false);
+        return Math.Clamp(full, resting,
+            Math.Max(resting, monitor.LocalWorkAreaDip.Width - CapsuleCloseWidth));
+    }
+
+    // Slide this capsule up to the master's slot and fade it out. The window stays shown
+    // (so it keeps counting as a deep-capsule member) but, being a per-pixel transparent
+    // window at Opacity 0, it is fully click-through and never blocks the master pill.
+    internal void RetractIntoMaster(EdgeCapsulePlacement placement, bool animate)
+    {
+        if (!_controller.State.UseCapsuleMode ||
+            !_controller.State.UseDeepCapsuleMode ||
+            !_paper.IsVisible ||
+            !_controller.CanPaperDisplayAsCapsule(_paper))
+        {
+            ClearDeepCapsulePlacement();
+            return;
+        }
+
+        if (!AttachEdgeCapsuleToQueue(
+                placement,
+                _paper.IsCollapsed ? EdgeCapsulePaperForm.Collapsed : EdgeCapsulePaperForm.Expanded,
+                retracted: true))
+        {
+            return;
+        }
+        UpdateDeepCapsuleSlotHostTheme();
+        RefreshEffectiveTopmost();
+
+        if (!TryStageEdgeCapsuleVisualTransaction(
+                animate,
+                EdgeCapsuleTransitionReason.Retraction,
+                EdgeCapsuleLayout.SlotRetractMoveMilliseconds,
+                refreshLayout: true))
+        {
+            RequestEdgeCapsulePresentation(
+                animate,
+                EdgeCapsuleTransitionReason.Retraction,
+                EdgeCapsuleLayout.SlotRetractMoveMilliseconds,
+                refreshLayout: true);
+        }
+        if (_paper.IsCollapsed)
+        {
+            HideMainWindowForDeepCapsuleRest();
+        }
+    }
+
+    internal void ApplyDeepCapsulePlacement(EdgeCapsulePlacement placement, bool animate = false)
+    {
+        if (!_paper.IsCollapsed || !_paper.IsVisible || !_controller.State.UseCapsuleMode || !_controller.State.UseDeepCapsuleMode)
+        {
+            ClearDeepCapsulePlacement();
+            return;
+        }
+
+        if (!AttachEdgeCapsuleToQueue(
+                placement,
+                EdgeCapsulePaperForm.Collapsed,
+                retracted: false))
+        {
+            return;
+        }
+        // Rearranging a queue changes placement, not the title/body generation. Invalidating here
+        // would discard every preloaded artifact immediately after staging the next preview.
+        RefreshCapsuleLabel(invalidatePreview: false);
+        ReserveEdgeCapsulePreviewCapacityBeforeFirstShow();
+        QueueDeepCapsuleFloatingDragInfrastructurePrewarm(
+            System.Windows.Threading.DispatcherPriority.SystemIdle,
+            requireActiveInteraction: false);
+        if (!TryStageEdgeCapsuleVisualTransaction(
+                animate,
+                EdgeCapsuleTransitionReason.Placement,
+                EdgeCapsuleLayout.SlotMoveMilliseconds,
+                refreshLayout: true))
+        {
+            RequestEdgeCapsulePresentation(
+                animate,
+                EdgeCapsuleTransitionReason.Placement,
+                EdgeCapsuleLayout.SlotMoveMilliseconds,
+                refreshLayout: true);
+        }
+        if (!IsPaperFormTransitioning)
+        {
+            HideMainWindowForDeepCapsuleRest();
+        }
+        RefreshEffectiveTopmost();
+    }
+
+    internal void PreviewDeepCapsulePlacement(EdgeCapsulePlacement placement)
+    {
+        if (!HasDeepCapsuleSlotPlacement ||
+            _edgeCapsuleHost?.IsVisible != true ||
+            IsDeepCapsuleReordering ||
+            IsDeepCapsuleRetractedIntoMaster)
+        {
+            return;
+        }
+
+        if (!UpdateEdgeCapsuleQueuePlacement(placement))
+        {
+            return;
+        }
+        if (!TryStageEdgeCapsuleVisualTransaction(
+                animate: true,
+                EdgeCapsuleTransitionReason.Placement,
+                EdgeCapsuleLayout.SlotMoveMilliseconds,
+                refreshLayout: true))
+        {
+            RequestEdgeCapsulePresentation(
+                animate: true,
+                EdgeCapsuleTransitionReason.Placement,
+                EdgeCapsuleLayout.SlotMoveMilliseconds,
+                refreshLayout: true);
+        }
+    }
+
+    internal void ApplyExpandedDeepCapsuleSlotPlacement(
+        EdgeCapsulePlacement placement,
+        bool animate = false,
+        bool deferInitialPresentation = false)
+    {
+        var shouldReserveWhileExpanded = _controller.State.ShowDeepCapsuleWhileExpanded &&
+            _controller.CanPaperDisplayAsCapsule(_paper);
+        if (_paper.IsCollapsed ||
+            !shouldReserveWhileExpanded ||
+            !_controller.State.UseCapsuleMode ||
+            !_controller.State.UseDeepCapsuleMode ||
+            !_paper.IsVisible)
+        {
+            ClearExpandedDeepCapsuleSlotPlacement();
+            return;
+        }
+
+        var shouldSaveExpandedGeometry = ShouldSaveDeepCapsuleExpandedGeometry;
+        if (!AttachEdgeCapsuleToQueue(
+                placement,
+                EdgeCapsulePaperForm.Expanded,
+                retracted: false))
+        {
+            return;
+        }
+        MarkEdgeCapsuleOpenedFromEdge();
+        RefreshCapsuleLabel(invalidatePreview: false);
+        ReserveEdgeCapsulePreviewCapacityBeforeFirstShow();
+        QueueDeepCapsuleFloatingDragInfrastructurePrewarm(
+            System.Windows.Threading.DispatcherPriority.SystemIdle,
+            requireActiveInteraction: false);
+        UpdateDeepCapsuleSlotHostTheme();
+
+        RefreshDeepCapsuleSlotLabel();
+
+        var firstShow = _edgeCapsuleHost?.IsVisible != true;
+        if (TryStageEdgeCapsuleVisualTransaction(
+                animate,
+                EdgeCapsuleTransitionReason.Placement,
+                EdgeCapsuleLayout.SlotMoveMilliseconds,
+                refreshLayout: true))
+        {
+            // The transaction commit owns the first visible frame together with every sibling.
+        }
+        else if (firstShow && !deferInitialPresentation)
+        {
+            FlushEdgeCapsulePresentation(
+                EdgeCapsuleTransitionReason.Placement,
+                EdgeCapsuleDirty.Presentation | EdgeCapsuleDirty.Measure);
+        }
+        else
+        {
+            RequestEdgeCapsulePresentation(
+                animate,
+                EdgeCapsuleTransitionReason.Placement,
+                EdgeCapsuleLayout.SlotMoveMilliseconds,
+                refreshLayout: true);
+        }
+        RefreshEffectiveTopmost();
+        UpdateToolTipSetting();
+        if (!IsPaperFormTransitioning && shouldSaveExpandedGeometry)
+        {
+            _controller.UpdateGeometry(_paper, this);
+        }
+    }
+
+    internal void FlushStartupDeepCapsulePresentation()
+    {
+        if (!HasDeepCapsuleSlotPlacement)
+        {
+            return;
+        }
+
+        FlushEdgeCapsulePresentation(
+            EdgeCapsuleTransitionReason.Placement,
+            EdgeCapsuleDirty.Presentation | EdgeCapsuleDirty.Measure);
+    }
+
+    public void ClearExpandedDeepCapsuleSlotPlacement(bool animate = false)
+    {
+        ChangeEdgeCapsulePaperForm(
+            _paper.IsCollapsed ? EdgeCapsulePaperForm.Collapsed : EdgeCapsulePaperForm.Expanded,
+            reserveWhileExpanded: false);
+        UpdateDeepCapsuleSlotHostTheme();
+        if (_paper.IsCollapsed && HasDeepCapsuleSlotPlacement)
+        {
+            RequestEdgeCapsulePresentation(
+                animate,
+                EdgeCapsuleTransitionReason.State,
+                EdgeCapsuleLayout.SlotMoveMilliseconds);
+        }
+    }
+
+    private void HideExpandedDeepCapsuleSlotHost(bool animate)
+    {
+        animate = animate && _controller.State.EnableAnimations;
+        if (animate &&
+            _edgeCapsuleHost?.IsVisible == true &&
+            HasDeepCapsuleSlotPlacement &&
+            _edgeCapsule.Placement.IsPlaced &&
+            !IsDeepCapsuleSlotRetracting)
+        {
+            if (!BeginEdgeCapsuleRetraction())
+            {
+                return;
+            }
+            RequestEdgeCapsulePresentation(
+                animate: true,
+                EdgeCapsuleTransitionReason.Retraction,
+                EdgeCapsuleLayout.SlotRetractMoveMilliseconds);
+            return;
+        }
+
+        DetachEdgeCapsuleFromQueue();
+        FlushEdgeCapsulePresentation(EdgeCapsuleTransitionReason.Retraction);
+    }
+
+    public void ClearDeepCapsulePlacement(bool animate = false)
+    {
+        _controller.CompleteEdgeCapsuleQueueCompositionProxyFor(this);
+        CancelDeepCapsuleReorderDrag();
+        animate = animate && _controller.State.EnableAnimations;
+
+        var shouldRetractBeforeHide = animate &&
+            _edgeCapsuleHost?.IsVisible == true &&
+            HasDeepCapsuleSlotPlacement &&
+            !IsDeepCapsuleRetractedIntoMaster;
+
+        if (shouldRetractBeforeHide)
+        {
+            HideExpandedDeepCapsuleSlotHost(animate: true);
+        }
+        else
+        {
+            UpdateCapsuleClosePlacement();
+            HideExpandedDeepCapsuleSlotHost(animate);
+        }
+
+        // A capsule may have been faded out while retracted behind the master; never leave
+        // a live (expanded or free-floating) window invisible.
+        if (Math.Abs(Opacity - 1.0) > 0.001)
+        {
+            BeginAnimation(OpacityProperty, null);
+            Opacity = 1.0;
+        }
+
+        if (!_paper.IsVisible || !_controller.State.UseCapsuleMode || !_controller.State.UseDeepCapsuleMode)
+        {
+            ClearEdgeCapsuleOpenOrigin();
+        }
+    }
+
+    // Fully remove this window from the edge stack, including any expanded reservation, and hide
+    // the docked host. Controller code uses this single operation when a paper leaves the stack.
+    public void DetachFromDeepCapsuleStack(bool animate = false)
+    {
+        ClearDeepCapsulePlacement(animate: animate);
+    }
+
+    public void UpdateDeepCapsuleMode()
+    {
+        if (!_controller.State.UseCapsuleMode || !_controller.State.UseDeepCapsuleMode)
+        {
+            ClearDeepCapsulePlacement();
+        }
+        else if (!_paper.IsCollapsed)
+        {
+            ClearDeepCapsulePlacement();
+        }
+        else
+        {
+            RequestEdgeCapsulePresentation(
+                animate: false,
+                EdgeCapsuleTransitionReason.State);
+        }
+
+        RefreshEffectiveTopmost();
+    }
+
+    public void UpdateDeepCapsuleExpandedSlotMode()
+    {
+        if (_paper.IsCollapsed)
+        {
+            return;
+        }
+
+        if (!_paper.IsVisible || !_controller.State.UseCapsuleMode || !_controller.State.UseDeepCapsuleMode)
+        {
+            DetachEdgeCapsuleFromQueue();
+            return;
+        }
+
+        if (_controller.State.ShowDeepCapsuleWhileExpanded && _controller.CanPaperDisplayAsCapsule(_paper))
+        {
+            if (!ChangeEdgeCapsulePaperForm(
+                    EdgeCapsulePaperForm.Expanded,
+                    reserveWhileExpanded: true))
+            {
+                return;
+            }
+            RefreshCapsuleLabel();
+            UpdateDeepCapsuleSlotHostTheme();
+            RequestEdgeCapsulePresentation(
+                animate: _controller.State.EnableAnimations,
+                EdgeCapsuleTransitionReason.State);
+            return;
+        }
+
+        if (!_controller.State.ShowDeepCapsuleWhileExpanded && HoldsDeepCapsuleSlotWhileExpanded)
+        {
+            ClearDeepCapsulePlacement(animate: _controller.State.EnableAnimations);
+        }
+    }
+}

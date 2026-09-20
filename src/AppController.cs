@@ -1,0 +1,3725 @@
+using System.Globalization;
+using System.IO;
+using System.Reflection;
+using System.Threading;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Data;
+using System.Windows.Media;
+using System.Windows.Media.Effects;
+using System.Windows.Input;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using Hardcodet.Wpf.TaskbarNotification;
+using Microsoft.Win32;
+using Application = System.Windows.Application;
+
+namespace PaperTodo;
+
+public sealed partial class AppController : IDisposable
+{
+    private enum AppLifecycleState
+    {
+        Running,
+        Exiting,
+        Disposed
+    }
+
+    private enum DisplayMetricsRefreshState
+    {
+        Idle,
+        Scheduled,
+        DeferredForCapsuleDrag
+    }
+
+    public static AppController Current { get; private set; } = null!;
+
+    private readonly AppStoragePaths _storage;
+    private readonly StateStore _store;
+    private readonly NoteImageStore _imageStore;
+    private readonly UpdateClient _updateClient;
+    private readonly UpdateStateStore _updateStateStore;
+    private readonly BackupService _backupService;
+    private readonly BackupRestoreCoordinator _backupRestoreCoordinator;
+    private readonly PluginStartupHealthStore _pluginStartupHealthStore;
+    private readonly PluginPolicyStore _pluginPolicyStore;
+    private readonly Dictionary<string, PaperWindow> _windows = new();
+    private readonly DispatcherTimer _saveTimer;
+    private readonly DispatcherTimer _forceSaveTimer;
+    private readonly DispatcherTimer _topmostRefreshTimer;
+    private readonly DispatcherTimer _fullscreenEventDebounceTimer;
+    private readonly DispatcherTimer _displayMetricsRefreshTimer;
+    private DispatcherTimer? _todoReminderTimer;
+    private bool _hasPendingDirty;
+
+    private TaskbarIcon? _trayIcon;
+    private ContextMenu? _trayMenu;
+    private readonly List<WeakReference<ContextMenu>> _liveTrayMenus = new();
+    private AppLifecycleState _lifecycleState = AppLifecycleState.Running;
+    private bool _suppressDirty;
+    private bool _hasShownSaveFailure;
+    private bool _ignoreSaveFailures;
+    private int _trayRefreshSuppressionDepth;
+    private bool _isRestoringStartupPapers;
+    private bool _isRestoringRuntimePaperBatch;
+    private bool _isPreparingStartupEdgeCapsules;
+    private int _paperSurfaceRestoreGeneration;
+    private int _startupShellPrewarmGeneration;
+    private long _saveVersion;
+    private long _stateRevision;
+    private readonly Dictionary<string, int> _visibilityAnimationVersions = new();
+    private FullscreenForegroundWindowWatcher? _fullscreenForegroundWindowWatcher;
+    private int _fullscreenEventForceGlobalScan;
+    private IntPtr _fullscreenAvoidanceWindow;
+    private string _fullscreenAvoidanceMonitorDeviceName = "";
+    private DateTimeOffset _lastFullscreenGlobalScanAt = DateTimeOffset.MinValue;
+    private DisplayMetricsRefreshState _displayMetricsRefreshState;
+    private readonly EdgeCapsuleArrangeGate _deepCapsuleArrangeGate = new();
+    private PaperWindow? _paperLinkTargetWindow;
+    private string? _paperLinkTargetItemId;
+    private readonly HashSet<string> _deepCapsuleContextMenuOwners = new(StringComparer.Ordinal);
+    // One master pill per docked-capsule queue, keyed by QueueKey(monitorDevice, edge).
+    private readonly Dictionary<string, MasterCapsuleWindow> _masterCapsules = new();
+
+    private static Brush TrayPaperBrush => Theme.PaperBrush;
+    private static Brush TrayBorderBrush => Theme.PaperBorderBrush;
+    private static Brush TrayTextBrush => Theme.TextBrush;
+    private static Brush TrayWeakTextBrush => Theme.WeakTextBrush;
+    private static Brush TrayHoverBrush => Theme.HoverBrush;
+
+    public AppState State { get; private set; }
+    public NoteImageStore ImageStore => _imageStore;
+    internal string NotesDirectory => _storage.NotesDirectory;
+    internal double DeepCapsuleGap =>
+        DeepCapsuleGapSizes.Value(State.DeepCapsuleGapSize);
+    internal bool IsRunning => _lifecycleState == AppLifecycleState.Running;
+    internal bool HasPaperLinkDropTarget =>
+        _paperLinkTargetWindow != null &&
+        !string.IsNullOrWhiteSpace(_paperLinkTargetItemId);
+    public bool SuppressDeepCapsuleTopmostForContextMenu => _deepCapsuleContextMenuOwners.Count > 0;
+    private bool ShouldAvoidFullscreenTopmost => FullscreenTopmostModes.Normalize(State.FullscreenTopmostMode) == FullscreenTopmostModes.Avoid;
+    private bool IsExiting => _lifecycleState != AppLifecycleState.Running;
+
+    internal IntPtr FullscreenAvoidanceWindowFor(Window? window)
+    {
+        if (_fullscreenAvoidanceWindow == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        return WindowWorkAreaHelper.TryGetMonitorDeviceName(window, out var monitorDeviceName)
+            ? FullscreenAvoidanceWindowForMonitor(monitorDeviceName)
+            : _fullscreenAvoidanceWindow;
+    }
+
+    internal IntPtr FullscreenAvoidanceWindowForQueue(string? queueMonitorDeviceName)
+    {
+        if (_fullscreenAvoidanceWindow == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        return WindowWorkAreaHelper.TryGetMonitorGeometryForDevice(queueMonitorDeviceName, out var geometry)
+            ? FullscreenAvoidanceWindowForMonitor(geometry.DeviceName)
+            : _fullscreenAvoidanceWindow;
+    }
+
+    private IntPtr FullscreenAvoidanceWindowForMonitor(string? monitorDeviceName)
+    {
+        if (_fullscreenAvoidanceWindow == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        // If either monitor cannot be resolved, retain the previous safe behavior and yield
+        // globally. Normal connected-monitor paths always compare concrete device names.
+        if (string.IsNullOrEmpty(_fullscreenAvoidanceMonitorDeviceName) ||
+            string.IsNullOrEmpty(monitorDeviceName))
+        {
+            return _fullscreenAvoidanceWindow;
+        }
+
+        return string.Equals(
+                monitorDeviceName,
+                _fullscreenAvoidanceMonitorDeviceName,
+                StringComparison.OrdinalIgnoreCase)
+            ? _fullscreenAvoidanceWindow
+            : IntPtr.Zero;
+    }
+
+    public AppController(bool forcePluginSafeMode = false, bool tryPluginsOnce = false)
+    {
+        Current = this;
+        _storage = AppStoragePaths.Initialize();
+        BackupRestoreCoordinator.ApplyPendingBeforeStoresOpen(_storage);
+        _pluginStartupHealthStore = new PluginStartupHealthStore(_storage.DataDirectory);
+        var pluginAssessment = _pluginStartupHealthStore.BeginRun();
+        _pluginPolicyStore = new PluginPolicyStore(
+            _storage.DataDirectory,
+            forcePluginSafeMode,
+            tryPluginsOnce);
+        _pluginPolicyStore.EnterAutomaticSafeMode(pluginAssessment);
+        _pluginStartupHealthStore.EnterStage(PluginStartupStage.LoadingState);
+        _store = new StateStore(_storage.DataDirectory, DurableAtomicFileWriter.Shared);
+        _imageStore = new NoteImageStore(Path.Combine(_storage.DataDirectory, "note-assets.lmdb"));
+        _updateStateStore = new UpdateStateStore(_storage.CacheDirectory, DurableAtomicFileWriter.Shared);
+        _updateClient = UpdateClient.CreateDefault(_storage.CacheDirectory);
+        State = _store.Load();
+        Theme.Invalidate();
+        RefreshApplicationThemeResources();
+        _imageStore.AutoCompressLargeImages = State.AutoCompressLargeImages;
+        _imageStore.Load();
+        var strippedInternalImageMarkers = StripInternalImageRenderMarkersFromState();
+        var protectedImageIdsForReuse = TryCollectUnprotectedImages();
+        // Only rebuild free numbers when the same protection scan that gates GC succeeded.
+        // A failed scan leaves reuse disabled so missing-but-referenced ids are never reissued.
+        _imageStore.PrepareReusableImageNumbers(protectedImageIdsForReuse);
+        NormalizePaperSystemVisibilitySettings();
+        AppTypography.Configure(
+            State.UiFontPreset,
+            State.Zoom,
+            State.CustomFontEnhancedBold,
+            State.TextRenderingProfile);
+        NoteTypography.Configure(State.NoteTextSize, State.NoteTextBold);
+        ToolTipPreferences.Register(() => State.EnableToolTips);
+        _paperBodyPlugins = new PaperBodyPluginRegistry(
+            _storage.PluginDataDirectory,
+            _pluginPolicyStore,
+            _pluginStartupHealthStore);
+        _backupRestoreCoordinator = new BackupRestoreCoordinator(_storage);
+        _backupService = new BackupService(
+            _storage,
+            _store,
+            _imageStore,
+            () =>
+            {
+                if (!TrySaveNow(sync: true))
+                    throw new IOException("Could not save the current PaperNook state before backup.");
+            },
+            () => _paperBodyPlugins.DataStore.FlushNowOrThrow());
+
+        // Idle debounce: save ~1s after the last change.
+        // Force cap: while edits keep resetting the idle timer, still flush at least every 10s.
+        _saveTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(1000)
+        };
+        _saveTimer.Tick += (_, _) =>
+        {
+            _saveTimer.Stop();
+            SaveNow();
+        };
+        _forceSaveTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(10)
+        };
+        _forceSaveTimer.Tick += (_, _) =>
+        {
+            _forceSaveTimer.Stop();
+            SaveNow();
+        };
+
+        if (strippedInternalImageMarkers)
+        {
+            MarkDirty();
+        }
+
+        _topmostRefreshTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _topmostRefreshTimer.Tick += (_, _) => RefreshTopmostForForegroundWindow();
+
+        _fullscreenEventDebounceTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(75)
+        };
+        _fullscreenEventDebounceTimer.Tick += (_, _) =>
+        {
+            _fullscreenEventDebounceTimer.Stop();
+            if (!IsExiting && ShouldAvoidFullscreenTopmost)
+            {
+                var forceGlobalScan = Interlocked.Exchange(ref _fullscreenEventForceGlobalScan, 0) != 0;
+                RefreshTopmostForForegroundWindow(forceGlobalScan);
+            }
+        };
+
+        _displayMetricsRefreshTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(250)
+        };
+        _displayMetricsRefreshTimer.Tick += (_, _) =>
+        {
+            _displayMetricsRefreshTimer.Stop();
+            RefreshAfterDisplayMetricsChanged();
+        };
+
+        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+        SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
+        SystemEvents.TimeChanged += OnSystemTimeChanged;
+        BackupRestoreCoordinator.MarkHealthy(_storage);
+    }
+
+    internal void MarkPluginStartupHealthy()
+    {
+        _pluginStartupHealthStore.MarkHealthy();
+        _pluginPolicyStore.CompleteHealthyRun();
+    }
+
+    private bool StripInternalImageRenderMarkersFromState()
+    {
+        var changed = false;
+        foreach (var paper in State.Papers)
+        {
+            if (paper.Type != PaperTypes.Note || string.IsNullOrEmpty(paper.Content))
+            {
+                continue;
+            }
+
+            var cleaned = MarkdownImageReferences.StripRenderMarkers(paper.Content);
+            if (!string.Equals(cleaned, paper.Content, StringComparison.Ordinal))
+            {
+                paper.Content = cleaned;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    public async Task StartAsync(
+        bool createDefaultPaper = true,
+        StartupCommandKind initialVisibilityCommand = StartupCommandKind.None)
+    {
+        CreateTrayIcon();
+        InitializeGlobalHotkeys();
+        _ = Task.Run(PaperWindow.CleanupOldScriptCapsuleTempFiles);
+        _ = Application.Current.Dispatcher.BeginInvoke(
+            () => { if (!IsExiting) PaperWindow.EnsurePersistentScriptProcessForSettings(State); },
+            DispatcherPriority.SystemIdle);
+        RefreshFullscreenAvoidanceRuntime();
+        RefreshTodoReminderSchedule();
+        RefreshExperimentalWindowRuntime();
+
+        if (State.Papers.Count == 0)
+        {
+            if (createDefaultPaper)
+            {
+                var showDefaultPaper = initialVisibilityCommand is not
+                    (StartupCommandKind.Hide or StartupCommandKind.Toggle);
+                CreatePaper(PaperTypes.Todo, show: showDefaultPaper);
+                if (!showDefaultPaper)
+                {
+                    ArrangeDeepCapsules();
+                }
+                SaveNow();
+            }
+            RefreshMcpRuntime();
+            await SchedulePluginStartupPapersAsync(initialVisibilityCommand);
+            return;
+        }
+
+        ApplyInitialStartupVisibility(initialVisibilityCommand);
+        DeferStartupPapersWithoutMonitor();
+        var rescuedPapers = EnsurePapersOnScreen();
+
+        // Establish entity-paper background ownership before any visible Body/Mini frontend can
+        // initialize and emit commands toward the provider Runtime during restore.
+        EnablePluginRuntimeReconciliation();
+
+        // Respect persisted IsVisible: hide closes the paper surface, delete removes it.
+        // Tray/show-all (and second-instance show) still restore everything intentionally.
+        var papersToRestore = State.Papers.Where(paper =>
+            paper.IsVisible && !_startupDisplayDeferredPapers.Contains(paper)).ToList();
+        await RestorePaperSurfacesAsync(papersToRestore);
+        CompleteDeferredStartupDisplayRestore();
+
+        if (rescuedPapers)
+        {
+            SaveNow();
+        }
+        RefreshMcpRuntime();
+        await SchedulePluginStartupPapersAsync(initialVisibilityCommand);
+    }
+
+    private async Task RestorePaperSurfacesAsync(IReadOnlyList<PaperData> papersToRestore)
+    {
+        var restoreGeneration = ++_paperSurfaceRestoreGeneration;
+        var activationPaper = papersToRestore.LastOrDefault(paper =>
+            !(State.UseCapsuleMode && State.UseDeepCapsuleMode && paper.IsCollapsed && CanPaperDisplayAsCapsule(paper)));
+        var edgeCapsulesToPrepare = papersToRestore
+            .Where(ShouldPrepareStartupEdgeCapsule)
+            .ToList();
+        _isPreparingStartupEdgeCapsules = edgeCapsulesToPrepare.Count > 0;
+
+        if (edgeCapsulesToPrepare.Count > 0)
+        {
+            var wasSuppressingDirty = _suppressDirty;
+            var wasRestoringPapers = _isRestoringStartupPapers;
+            _suppressDirty = true;
+            _trayRefreshSuppressionDepth++;
+            _isRestoringStartupPapers = true;
+            try
+            {
+                foreach (var paper in edgeCapsulesToPrepare)
+                {
+                    GetOrCreatePaperWindow(paper, deferShellConstruction: true);
+                }
+
+                ArrangeDeepCapsules(
+                    animate: State.EnableAnimations,
+                    flushInitialPresentations: true);
+            }
+            finally
+            {
+                _isRestoringStartupPapers = wasRestoringPapers;
+                _trayRefreshSuppressionDepth--;
+                _suppressDirty = wasSuppressingDirty;
+            }
+
+            RefreshTrayMenu();
+
+            // The continuation runs below Render/Loaded so edge hosts reach the compositor
+            // before full paper shells begin their sequential construction.
+            await Application.Current.Dispatcher.InvokeAsync(
+                static () => { },
+                DispatcherPriority.ApplicationIdle);
+            if (restoreGeneration != _paperSurfaceRestoreGeneration)
+            {
+                return;
+            }
+            if (IsExiting)
+            {
+                _isPreparingStartupEdgeCapsules = false;
+                return;
+            }
+        }
+
+        var wasSuppressingDirtyForShow = _suppressDirty;
+        var wasRestoringPapersForShow = _isRestoringStartupPapers;
+        _suppressDirty = true;
+        _trayRefreshSuppressionDepth++;
+        _isRestoringStartupPapers = true;
+        try
+        {
+            foreach (var paper in papersToRestore)
+            {
+                if (!paper.IsVisible || !State.Papers.Contains(paper))
+                {
+                    continue;
+                }
+
+                if (paper.IsCollapsed &&
+                    ShouldPrepareStartupEdgeCapsule(paper) &&
+                    _windows.TryGetValue(paper.Id, out var capsuleWindow) &&
+                    capsuleWindow.IsDeepCapsulePlaced)
+                {
+                    continue;
+                }
+
+                ShowPaper(paper, activate: ReferenceEquals(paper, activationPaper));
+            }
+
+            _isPreparingStartupEdgeCapsules = false;
+            ArrangeDeepCapsules(
+                animate: State.EnableAnimations,
+                flushInitialPresentations: true);
+        }
+        finally
+        {
+            _isPreparingStartupEdgeCapsules = false;
+            _isRestoringStartupPapers = wasRestoringPapersForShow;
+            _trayRefreshSuppressionDepth--;
+            _suppressDirty = wasSuppressingDirtyForShow;
+        }
+
+        RefreshTrayMenu();
+        // Preview artifacts use the existing edge host and model; their first pass precedes
+        // optional collapsed Shell/editor construction rather than waiting behind it.
+        foreach (var window in _windows.Values) window.RequestMarkdownPreviewLayoutPreload();
+        ScheduleStartupShellPrewarm(papersToRestore, startPreviewPreload: true);
+    }
+
+    private void ApplyInitialStartupVisibility(StartupCommandKind command)
+    {
+        bool? isVisible = command switch
+        {
+            StartupCommandKind.Hide => false,
+            StartupCommandKind.Toggle => !State.Papers.Any(paper => paper.IsVisible),
+            _ => null
+        };
+        if (!isVisible.HasValue)
+        {
+            return;
+        }
+
+        foreach (var paper in State.Papers)
+        {
+            paper.IsVisible = isVisible.Value;
+        }
+        MarkDirty();
+    }
+
+    private bool ShouldPrepareStartupEdgeCapsule(PaperData paper)
+    {
+        return State.UseCapsuleMode &&
+            State.UseDeepCapsuleMode &&
+            paper.IsVisible &&
+            CanPaperDisplayAsCapsule(paper) &&
+            (paper.IsCollapsed || State.ShowDeepCapsuleWhileExpanded);
+    }
+
+    private void ScheduleDeferredShellPrewarm(PaperData paper, PaperWindow window)
+    {
+        Application.Current.Dispatcher.BeginInvoke(
+            (Action)(() =>
+            {
+                if (IsExiting ||
+                    !paper.IsVisible ||
+                    window.IsClosed ||
+                    window.IsShellBuilt)
+                {
+                    return;
+                }
+
+                window.EnsureShellBuilt();
+            }),
+            DispatcherPriority.ApplicationIdle);
+    }
+
+    public PaperData? CreatePaper(string type, bool show = true, PaperData? sourcePaper = null)
+    {
+        if (State.Papers.Count >= 200)
+        {
+            ShowPaperLimitDialog();
+            return null;
+        }
+
+        (string DeviceName, Rect WorkArea)? cursorMonitor = null;
+        if (sourcePaper == null && WindowNative.TryGetCursorScreenPosition(out var cursorPosition))
+        {
+            cursorMonitor = WindowWorkAreaHelper.MonitorAtDeviceScreenPoint(cursorPosition);
+        }
+
+        var offset = State.Papers.Count * 24;
+        double newX = 140 + offset;
+        double newY = 140 + offset;
+
+        if (sourcePaper != null)
+        {
+            var sourceX = sourcePaper.X;
+            var sourceY = sourcePaper.Y;
+            if (_windows.TryGetValue(sourcePaper.Id, out var sourceWindow) &&
+                sourceWindow.IsVisible &&
+                !sourcePaper.IsCollapsed &&
+                !double.IsNaN(sourceWindow.Left) &&
+                !double.IsNaN(sourceWindow.Top))
+            {
+                sourceX = sourceWindow.Left;
+                sourceY = sourceWindow.Top;
+            }
+
+            newX = sourceX + 30;
+            newY = sourceY + 30;
+        }
+        else if (cursorMonitor is { } cursorTarget)
+        {
+            // Provisional; refined to cursor-centered placement after size is known.
+            newX = cursorTarget.WorkArea.Left + 40;
+            newY = cursorTarget.WorkArea.Top + 40;
+        }
+
+        var paperType = type == PaperTypes.Note ? PaperTypes.Note : PaperTypes.Todo;
+        var paper = new PaperData
+        {
+            Type = paperType,
+            Title = PaperTitles.DefaultTitle(paperType, NextTitleNumber(paperType)),
+            X = newX,
+            Y = newY,
+            Width = type == PaperTypes.Note ? PaperLayoutDefaults.NoteDefaultWidth : PaperLayoutDefaults.TodoDefaultWidth,
+            Height = type == PaperTypes.Note ? PaperLayoutDefaults.NoteDefaultHeight : PaperLayoutDefaults.TodoDefaultHeight,
+            IsVisible = show,
+            AlwaysOnTop = sourcePaper?.AlwaysOnTop ?? false
+        };
+        InitializeNewPaperCapsuleQueue(paper, sourcePaper, cursorMonitor?.DeviceName);
+
+        if (cursorMonitor is { } targetMonitor)
+        {
+            paper.Width = ClampPaperDimension(
+                paper.Width,
+                paper.Type == PaperTypes.Note ? PaperLayoutDefaults.NoteDefaultWidth : PaperLayoutDefaults.TodoDefaultWidth,
+                PaperLayoutDefaults.MinWidth,
+                Math.Max(PaperLayoutDefaults.MinWidth, targetMonitor.WorkArea.Width - 80));
+            paper.Height = ClampPaperDimension(
+                paper.Height,
+                paper.Type == PaperTypes.Note ? PaperLayoutDefaults.NoteDefaultHeight : PaperLayoutDefaults.TodoDefaultHeight,
+                PaperLayoutDefaults.MinHeight,
+                Math.Max(PaperLayoutDefaults.MinHeight, targetMonitor.WorkArea.Height - 80));
+            if (sourcePaper == null &&
+                TryCreateCursorPaperPlacement(paper.Width, paper.Height, out var cursorLeft, out var cursorTop))
+            {
+                paper.X = cursorLeft;
+                paper.Y = cursorTop;
+            }
+            else
+            {
+                PlacePaperInWorkArea(paper, targetMonitor.WorkArea, State.Papers.Count);
+            }
+        }
+        else
+        {
+            RescuePaperIfOffScreen(paper, State.Papers.Count);
+        }
+        ClampNewPaperAwayFromDeepCapsuleStrip(paper);
+        var placementArea = cursorMonitor is { } target
+            ? target.WorkArea
+            : WorkAreaForPaper(paper);
+        NudgeNewPaperAwayFromExistingPapers(paper, placementArea);
+
+        if (paper.Type == PaperTypes.Todo)
+        {
+            paper.Items.Add(new PaperItem
+            {
+                Text = "",
+                Done = false,
+                Order = 0
+            });
+        }
+
+        State.Papers.Add(paper);
+
+        if (show)
+        {
+            _trayRefreshSuppressionDepth++;
+            try
+            {
+                ShowPaper(paper);
+                if (sourcePaper != null && _windows.TryGetValue(paper.Id, out var window))
+                {
+                    ForceWindowToFront(window);
+                }
+            }
+            finally
+            {
+                _trayRefreshSuppressionDepth--;
+            }
+        }
+
+        RefreshTrayMenu();
+        MarkDirty();
+        return paper;
+    }
+
+    private void InitializeNewPaperCapsuleQueue(
+        PaperData paper,
+        PaperData? sourcePaper,
+        string? cursorMonitorDeviceName)
+    {
+        paper.CapsuleSide = string.IsNullOrWhiteSpace(sourcePaper?.CapsuleSide)
+            ? DeepCapsuleSides.Normalize(State.DeepCapsuleSide)
+            : DeepCapsuleSides.Normalize(sourcePaper.CapsuleSide);
+
+        var monitor = sourcePaper != null
+            ? sourcePaper.CapsuleMonitorDeviceName ?? ""
+            : !string.IsNullOrWhiteSpace(cursorMonitorDeviceName)
+                ? cursorMonitorDeviceName
+                : State.DeepCapsuleMonitorDeviceName ?? "";
+        paper.CapsuleMonitorDeviceName = WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(monitor);
+    }
+
+    private void ClampNewPaperAwayFromDeepCapsuleStrip(PaperData paper)
+    {
+        if (!paper.IsVisible ||
+            !State.UseCapsuleMode ||
+            !State.UseDeepCapsuleMode ||
+            !State.ShowDeepCapsuleWhileExpanded ||
+            !CanPaperDisplayAsCapsule(paper))
+        {
+            return;
+        }
+
+        var area = EdgeCapsuleLayout.WorkAreaForQueue(paper.CapsuleMonitorDeviceName);
+        if (area.Width <= 0 || area.Height <= 0)
+        {
+            return;
+        }
+
+        const double margin = 8;
+        var width = Math.Max(paper.Width, PaperLayoutDefaults.MinWidth);
+        var height = Math.Max(paper.Height, PaperLayoutDefaults.MinHeight);
+        var minX = area.Left + margin;
+        var maxX = Math.Max(minX, area.Right - width - margin);
+        ApplyNewPaperCapsuleStripBounds(paper, area, width, ref minX, ref maxX);
+
+        var minY = area.Top + margin;
+        var maxY = Math.Max(minY, area.Bottom - height - margin);
+        paper.X = Math.Round(Math.Clamp(paper.X, minX, maxX));
+        paper.Y = Math.Round(Math.Clamp(paper.Y, minY, maxY));
+    }
+
+    private void ApplyNewPaperCapsuleStripBounds(
+        PaperData paper,
+        Rect area,
+        double width,
+        ref double minX,
+        ref double maxX)
+    {
+        if (!paper.IsVisible ||
+            !State.UseCapsuleMode ||
+            !State.UseDeepCapsuleMode ||
+            !State.ShowDeepCapsuleWhileExpanded ||
+            !CanPaperDisplayAsCapsule(paper))
+        {
+            return;
+        }
+
+        var edgeInset = Math.Min(
+            Math.Max(
+                EdgeCapsuleLayout.ExpandedEdgeInset,
+                Math.Max(
+                    VisibleDeepCapsuleRestingWidthForQueue(paper) + DeepCapsuleGap,
+                    PaperLayoutDefaults.CapsuleWidth + DeepCapsuleGap)),
+            Math.Max(0, area.Width - width));
+        if (paper.CapsuleSide == DeepCapsuleSides.Left)
+        {
+            minX = Math.Min(maxX, Math.Max(minX, area.Left + edgeInset));
+        }
+        else
+        {
+            maxX = Math.Max(minX, Math.Min(maxX, area.Right - width - edgeInset));
+        }
+    }
+
+    private int NextTitleNumber(string paperType)
+    {
+        var normalizedType = paperType == PaperTypes.Note ? PaperTypes.Note : PaperTypes.Todo;
+        var prefix = PaperTitles.DefaultTitlePrefix(normalizedType);
+        var usedNumbers = new HashSet<int>();
+
+        foreach (var paper in State.Papers.Where(p => p.Type == normalizedType))
+        {
+            var title = PaperTitles.CleanCustomTitle(paper.Title);
+            if (title.StartsWith(prefix, StringComparison.Ordinal) &&
+                int.TryParse(title[prefix.Length..], out var number) &&
+                number > 0)
+            {
+                usedNumbers.Add(number);
+            }
+        }
+
+        var next = 1;
+        while (usedNumbers.Contains(next))
+        {
+            next++;
+        }
+
+        return next;
+    }
+
+    public int TitleNumberFor(PaperData paper)
+    {
+        var normalizedType = paper.Type == PaperTypes.Note ? PaperTypes.Note : PaperTypes.Todo;
+        var number = 1;
+        foreach (var existing in State.Papers)
+        {
+            if (existing.Type != normalizedType)
+            {
+                continue;
+            }
+
+            if (existing.Id == paper.Id)
+            {
+                return number;
+            }
+
+            number++;
+        }
+
+        return Math.Max(1, number);
+    }
+
+    public string PaperTitleText(PaperData paper)
+    {
+        return PaperTitles.EffectiveTitle(paper, TitleNumberFor(paper));
+    }
+
+    public string PaperDisplayTitle(PaperData paper)
+    {
+        if (_windows.TryGetValue(paper.Id, out var window) &&
+            window.TryGetPluginDisplayTitle(out var displayTitle))
+        {
+            return displayTitle;
+        }
+        if (paper.Type == PaperTypes.Note &&
+            !string.Equals(
+                paper.BodyProviderId,
+                PaperBodyProviderIds.Markdown,
+                StringComparison.Ordinal) &&
+            PaperBodyPlugins.TryGet(paper.BodyProviderId, out _))
+        {
+            if (!string.IsNullOrWhiteSpace(paper.BodyHeaderText))
+            {
+                return paper.BodyHeaderText;
+            }
+        }
+
+        return PaperTitleText(paper);
+    }
+
+    public string PaperCapsuleTitle(PaperData paper)
+    {
+        if (_windows.TryGetValue(paper.Id, out var window) &&
+            window.TryGetPluginCapsuleTitle(out var capsuleTitle))
+        {
+            return capsuleTitle;
+        }
+        if (paper.Type == PaperTypes.Note &&
+            !string.Equals(
+                paper.BodyProviderId,
+                PaperBodyProviderIds.Markdown,
+                StringComparison.Ordinal) &&
+            PaperBodyPlugins.TryGet(paper.BodyProviderId, out _) &&
+            !string.IsNullOrWhiteSpace(paper.BodyCapsuleText))
+        {
+            return paper.BodyCapsuleText;
+        }
+
+        return PaperTitleText(paper);
+    }
+
+    public void UpdatePaperTitle(PaperData paper, string title)
+    {
+        var cleaned = PaperTitles.CleanCustomTitle(title, State.MaxTitleLength);
+        if (paper.Title == cleaned)
+        {
+            return;
+        }
+
+        paper.Title = cleaned;
+        if (_windows.TryGetValue(paper.Id, out var window))
+        {
+            window.RefreshPaperTitle();
+        }
+        NotifyPaperDisplayTitleChanged(paper.Id);
+        RefreshTrayMenu();
+        MarkDirty();
+    }
+
+    public void SetPaperTextZoom(PaperData paper, double zoom)
+    {
+        if (paper.Type != PaperTypes.Note)
+        {
+            return;
+        }
+
+        var normalized = Math.Round(Math.Clamp(zoom, 0.5, 1.5), 1);
+        if (Math.Abs(paper.TextZoom - normalized) < 0.001)
+        {
+            return;
+        }
+
+        paper.TextZoom = normalized;
+        if (_windows.TryGetValue(paper.Id, out var window))
+        {
+            window.UpdateTextZoom();
+        }
+        MarkDirty();
+    }
+
+    public void TogglePaperVisibility(PaperData paper)
+    {
+        if (IsPaperShown(paper))
+        {
+            HidePaper(paper);
+        }
+        else
+        {
+            ShowPaper(paper);
+        }
+    }
+
+    public bool IsExistingNote(string? noteId)
+    {
+        return FindNote(noteId) != null;
+    }
+
+    public bool IsExistingPaper(string? paperId)
+    {
+        return FindPaper(paperId) != null;
+    }
+
+    public bool TryGetLinkedPaperTitle(string? paperId, out string title)
+    {
+        var paper = FindPaper(paperId);
+        if (paper == null)
+        {
+            title = "";
+            return false;
+        }
+
+        title = PaperDisplayTitle(paper);
+        return true;
+    }
+
+    public bool IsLinkedPaperShown(string? paperId)
+    {
+        var paper = FindPaper(paperId);
+        return paper != null &&
+            _windows.TryGetValue(paper.Id, out var window) &&
+            paper.IsVisible &&
+            window.HasExpandedPaperSurface;
+    }
+
+    public bool ShouldRunLinkedScriptCapsule(string? noteId)
+    {
+        return State.EnableTodoPaperLinks &&
+            State.RunLinkedScriptCapsulesOnClick &&
+            IsLinkedScriptCapsule(noteId);
+    }
+
+    private bool IsLinkedScriptCapsule(string? noteId)
+    {
+        var note = FindNote(noteId);
+        return note != null && IsCurrentScriptCapsule(note);
+    }
+
+    public bool RunLinkedScriptCapsule(string? noteId)
+    {
+        var note = FindNote(noteId);
+        if (note == null || !IsCurrentScriptCapsule(note))
+        {
+            return false;
+        }
+
+        var window = GetOrCreatePaperWindow(note);
+        return window.TryRunScriptCapsule();
+    }
+
+    private bool IsCurrentScriptCapsule(PaperData note)
+    {
+        if (!string.Equals(
+                note.BodyProviderId,
+                PaperBodyProviderIds.Markdown,
+                StringComparison.Ordinal))
+        {
+            return false;
+        }
+        return _windows.TryGetValue(note.Id, out var window)
+            ? window.IsCurrentScriptCapsule()
+            : PaperWindow.IsScriptCapsuleContent(note.Content);
+    }
+
+    public void NotifyPaperDisplayTitleChanged(string? paperId)
+    {
+        if (string.IsNullOrWhiteSpace(paperId))
+        {
+            return;
+        }
+
+        foreach (var window in _windows.Values)
+        {
+            window.RefreshLinkedPaperTitle(paperId);
+        }
+    }
+
+    public void RefreshTodoRowsForLinkedPaper(string? paperId)
+    {
+        if (string.IsNullOrWhiteSpace(paperId))
+        {
+            return;
+        }
+
+        foreach (var window in _windows.Values)
+        {
+            window.RefreshLinkedPaperRows(paperId);
+        }
+    }
+
+    public bool IsPaperLinkedToAnyTodo(PaperData paper)
+    {
+        var paperId = paper.Id;
+        foreach (var sourcePaper in State.Papers)
+        {
+            if (sourcePaper.Type != PaperTypes.Todo)
+            {
+                continue;
+            }
+
+            foreach (var item in sourcePaper.Items)
+            {
+                if (string.Equals(item.LinkedPaperId, paperId, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public bool CanPaperDisplayAsCapsule(PaperData paper)
+    {
+        if (!State.UseCapsuleMode)
+        {
+            return false;
+        }
+
+        return !(State.EnableTodoPaperLinks &&
+            State.HideLinkedPapersFromCapsules &&
+            IsPaperLinkedToAnyTodo(paper));
+    }
+
+    public void OpenLinkedPaper(string? paperId, Window? anchorWindow = null)
+    {
+        var paper = FindPaper(paperId);
+        if (paper == null)
+        {
+            return;
+        }
+
+        if (_windows.TryGetValue(paper.Id, out var window))
+        {
+            if (IsLinkedPaperShown(paper.Id))
+            {
+                if (State.CollapseExpandedDeepCapsuleOnClick && window.TryHandleLinkedPaperRepeatedOpenAsDeepCapsuleToggle())
+                {
+                    RefreshTodoRowsForLinkedPaper(paper.Id);
+                    RefreshTrayMenu();
+                    MarkDirty();
+                    return;
+                }
+
+                BringPaperToFront(paper);
+                RefreshTodoRowsForLinkedPaper(paper.Id);
+                return;
+            }
+
+            window.RestoreExperimentalTetherPresentationForExplicitShow();
+            paper.IsVisible = true;
+            RescuePaperIfOffScreen(paper, State.Papers.IndexOf(paper));
+            window.CancelPendingVisibilityTransitions();
+            // Resolve the final origin before Show()/shell visibility can expose the old capsule HWND.
+            var programmaticOrigin = PlaceLinkedPaperBesideAnchor(paper, window, anchorWindow);
+
+            if (paper.IsCollapsed)
+            {
+                window.ExpandForProgrammaticOpen(programmaticOrigin);
+            }
+            else if (!window.HasVisibleSurface)
+            {
+                RestoreExistingPaperWindowSurface(paper, window);
+            }
+
+            ForceWindowToFront(window);
+            RefreshTodoRowsForLinkedPaper(paper.Id);
+            RefreshTrayMenu();
+            MarkDirty();
+            return;
+        }
+
+        SetPaperCollapsedRuntime(paper, collapsed: false, animate: false, saveGeometry: false);
+        PlaceLinkedPaperBesideAnchor(paper, null, anchorWindow);
+        ShowPaper(paper);
+        if (_windows.TryGetValue(paper.Id, out window))
+        {
+            ForceWindowToFront(window);
+        }
+        RefreshTodoRowsForLinkedPaper(paper.Id);
+    }
+
+    public void BeginPaperLinkDrag(PaperData sourcePaper)
+    {
+        if (!State.EnableTodoPaperLinks || !IsExistingPaper(sourcePaper.Id))
+        {
+            return;
+        }
+
+        ClearPaperLinkDropTarget();
+    }
+
+    public void UpdatePaperLinkDrag(PaperData sourcePaper, Point screenPoint)
+    {
+        if (!State.EnableTodoPaperLinks || !IsExistingPaper(sourcePaper.Id))
+        {
+            ClearPaperLinkDropTarget();
+            return;
+        }
+
+        PaperWindow? targetWindow = null;
+        string? targetItemId = null;
+
+        foreach (var window in _windows.Values)
+        {
+            if (string.Equals(window.PaperId, sourcePaper.Id, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (window.TryHitTodoRow(screenPoint, out var itemId))
+            {
+                targetWindow = window;
+                targetItemId = itemId;
+            }
+        }
+
+        if (ReferenceEquals(_paperLinkTargetWindow, targetWindow) &&
+            string.Equals(_paperLinkTargetItemId, targetItemId, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        ClearPaperLinkDropTarget();
+
+        if (targetWindow != null && !string.IsNullOrWhiteSpace(targetItemId))
+        {
+            _paperLinkTargetWindow = targetWindow;
+            _paperLinkTargetItemId = targetItemId;
+            targetWindow.SetPaperLinkDropTarget(targetItemId);
+        }
+    }
+
+    public bool EndPaperLinkDrag(PaperData sourcePaper, bool commit)
+    {
+        var linked = false;
+        if (State.EnableTodoPaperLinks &&
+            IsExistingPaper(sourcePaper.Id) &&
+            commit &&
+            _paperLinkTargetWindow != null &&
+            !string.IsNullOrWhiteSpace(_paperLinkTargetItemId))
+        {
+            linked = _paperLinkTargetWindow.LinkPaperToTodo(
+                _paperLinkTargetItemId,
+                sourcePaper.Id);
+        }
+
+        ClearPaperLinkDropTarget();
+        return linked;
+    }
+
+    private static PaperWindow.ProgrammaticPaperExpansionOrigin? PlaceLinkedPaperBesideAnchor(
+        PaperData linkedPaper,
+        Window? linkedPaperWindow,
+        Window? anchorWindow)
+    {
+        if (anchorWindow == null || double.IsNaN(anchorWindow.Left) || double.IsNaN(anchorWindow.Top))
+        {
+            return null;
+        }
+
+        const double gap = 10;
+        const double margin = 8;
+        var area = WindowWorkAreaHelper.WorkAreaFor(anchorWindow);
+
+        var linkedPaperWidth = Math.Max(
+            Math.Max(linkedPaperWindow is { ActualWidth: > 1 } ? linkedPaperWindow.ActualWidth : 0, linkedPaper.Width),
+            PaperLayoutDefaults.MinWidth);
+        var linkedPaperHeight = Math.Max(
+            Math.Max(linkedPaperWindow is { ActualHeight: > 1 } ? linkedPaperWindow.ActualHeight : 0, linkedPaper.Height),
+            PaperLayoutDefaults.MinHeight);
+
+        linkedPaperWidth = Math.Min(linkedPaperWidth, Math.Max(PaperLayoutDefaults.MinWidth, area.Width - (margin * 2)));
+        linkedPaperHeight = Math.Min(linkedPaperHeight, Math.Max(PaperLayoutDefaults.MinHeight, area.Height - (margin * 2)));
+
+        var anchorWidth = anchorWindow.ActualWidth > 1 ? anchorWindow.ActualWidth : anchorWindow.Width;
+        if (double.IsNaN(anchorWidth) || double.IsInfinity(anchorWidth) || anchorWidth <= 1)
+        {
+            anchorWidth = PaperLayoutDefaults.TodoDefaultWidth;
+        }
+
+        var rightX = anchorWindow.Left + anchorWidth + gap;
+        var leftX = anchorWindow.Left - linkedPaperWidth - gap;
+        var minX = area.Left + margin;
+        var maxX = Math.Max(minX, area.Right - linkedPaperWidth - margin);
+
+        var targetX = rightX <= maxX
+            ? rightX
+            : leftX >= minX
+                ? leftX
+                : Math.Clamp(rightX, minX, maxX);
+
+        var minY = area.Top + margin;
+        var maxY = Math.Max(minY, area.Bottom - linkedPaperHeight - margin);
+        var targetY = Math.Clamp(anchorWindow.Top, minY, maxY);
+
+        linkedPaper.X = Math.Round(targetX);
+        linkedPaper.Y = Math.Round(targetY);
+
+        if (linkedPaperWindow != null)
+        {
+            linkedPaperWindow.Left = linkedPaper.X;
+            linkedPaperWindow.Top = linkedPaper.Y;
+        }
+
+        return new PaperWindow.ProgrammaticPaperExpansionOrigin(linkedPaper.X, linkedPaper.Y);
+    }
+
+    private void ClearPaperLinkDropTarget()
+    {
+        _paperLinkTargetWindow?.SetPaperLinkDropTarget(null);
+        _paperLinkTargetWindow = null;
+        _paperLinkTargetItemId = null;
+    }
+
+    private PaperData? FindPaper(string? paperId)
+    {
+        if (string.IsNullOrWhiteSpace(paperId))
+        {
+            return null;
+        }
+
+        return State.Papers.FirstOrDefault(p => p.Id == paperId);
+    }
+
+    private PaperData? FindNote(string? noteId)
+    {
+        var paper = FindPaper(noteId);
+        return paper?.Type == PaperTypes.Note ? paper : null;
+    }
+
+    public void ExecuteStartupCommand(StartupCommand command)
+    {
+        if (command.Kind is StartupCommandKind.Show or
+            StartupCommandKind.Toggle or
+            StartupCommandKind.NewTodo or
+            StartupCommandKind.NewNote)
+        {
+            // Startup and secondary-instance commands arrive before PaperTodo intentionally takes focus.
+            // Refresh here so a recent desktop/taskbar switch cannot leave stale fullscreen avoidance.
+            RefreshTopmostForForegroundWindow(forceGlobalScan: true);
+        }
+
+        switch (command.Kind)
+        {
+            case StartupCommandKind.Show:
+                ShowAllPapers();
+                break;
+            case StartupCommandKind.Hide:
+                HideAllPapers();
+                break;
+            case StartupCommandKind.Toggle:
+                if (State.Papers.Any(IsPaperShown))
+                {
+                    HideAllPapers();
+                }
+                else
+                {
+                    ShowAllPapers();
+                }
+                break;
+            case StartupCommandKind.NewTodo:
+                CreatePaper(PaperTypes.Todo, show: true);
+                break;
+            case StartupCommandKind.NewNote:
+                CreatePaper(PaperTypes.Note, show: true);
+                break;
+            case StartupCommandKind.Exit:
+                Exit();
+                break;
+        }
+    }
+
+    private int NextVisibilityAnimationVersion(string paperId)
+    {
+        _visibilityAnimationVersions.TryGetValue(paperId, out var current);
+        var next = current + 1;
+        _visibilityAnimationVersions[paperId] = next;
+        return next;
+    }
+
+    private bool IsVisibilityAnimationCurrent(string paperId, int version)
+    {
+        return _visibilityAnimationVersions.TryGetValue(paperId, out var current) && current == version;
+    }
+
+    private PaperWindow GetOrCreatePaperWindow(
+        PaperData paper,
+        bool deferShellConstruction = false)
+    {
+        if (_windows.TryGetValue(paper.Id, out var existing))
+        {
+            if (!existing.IsClosed)
+            {
+                if (!deferShellConstruction)
+                {
+                    existing.EnsureShellBuilt();
+                }
+                return existing;
+            }
+
+            _windows.Remove(paper.Id);
+        }
+
+        var paperId = paper.Id;
+        var window = new PaperWindow(paper, this, deferShellConstruction);
+        if (_experimentalAllSurfacesPassive)
+        {
+            window.SetExperimentalAllSurfacesPassive(enabled: true);
+        }
+        window.SetAdvancedInteractionLocked(_advancedAllPapersLocked);
+        window.Closed += (_, _) =>
+        {
+            NotifyPaperWindowClosed(window);
+            if (_windows.TryGetValue(paperId, out var current) && ReferenceEquals(current, window))
+            {
+                _windows.Remove(paperId);
+            }
+        };
+        _windows[paperId] = window;
+        return window;
+    }
+
+    private void SetPaperCollapsedRuntime(
+        PaperData paper,
+        bool collapsed,
+        bool animate,
+        bool saveGeometry)
+    {
+        // Hidden windows are still live presentation owners. Let them consume the complete form
+        // transition before falling back to the persisted source for papers with no live window.
+        if (_windows.TryGetValue(paper.Id, out var window) && !window.IsClosed)
+        {
+            window.SetCollapsedState(collapsed, animate, saveGeometry);
+            return;
+        }
+
+        paper.IsCollapsed = collapsed;
+    }
+
+    public void ShowPaper(PaperData paper, bool activate = true)
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        // An explicit show is a user decision, not a late startup callback.
+        _startupDisplayDeferredPapers.Remove(paper);
+        InvalidateVisibilityShortcutSnapshotForExternalCommand();
+        if (!_suppressDirty)
+        {
+            RefreshTopmostForForegroundWindow();
+        }
+        if (paper.IsCollapsed && !CanPaperDisplayAsCapsule(paper))
+        {
+            SetPaperCollapsedRuntime(paper, collapsed: false, animate: false, saveGeometry: false);
+        }
+        paper.IsVisible = true;
+        var visibilityVersion = NextVisibilityAnimationVersion(paper.Id);
+        if (!_suppressDirty)
+        {
+            RescuePaperIfOffScreen(paper, State.Papers.IndexOf(paper));
+        }
+        Rect? snapTileBounds = null;
+
+        var showAsDeepCapsuleOnly = State.UseCapsuleMode && State.UseDeepCapsuleMode && paper.IsCollapsed;
+        var window = GetOrCreatePaperWindow(
+            paper,
+            deferShellConstruction: showAsDeepCapsuleOnly);
+        window.RestoreExperimentalTetherPresentationForExplicitShow();
+        window.CancelPendingVisibilityTransitions();
+        if (!showAsDeepCapsuleOnly)
+        {
+            RestoreWindowIfMinimized(window);
+        }
+        // Restore first: a hidden minimized window raises StateChanged while it is still invisible,
+        // so that event cannot resume note image rendering on its own.
+        window.PrepareForShow();
+        if (!paper.IsCollapsed && window.TryGetRememberedSnapTileBoundsForRestore(out var rememberedSnapTileBounds))
+        {
+            snapTileBounds = rememberedSnapTileBounds;
+        }
+
+        if (!showAsDeepCapsuleOnly && !window.IsVisible)
+        {
+            var targetBounds = snapTileBounds is Rect snapTile
+                ? snapTile
+                : new Rect(paper.X, paper.Y, paper.Width, paper.Height);
+            window.Left = targetBounds.Left;
+            window.Top = targetBounds.Top;
+            if (paper.IsCollapsed && State.UseCapsuleMode)
+            {
+                window.Width = window.DesiredCapsuleWindowWidth;
+                window.Height = PaperLayoutDefaults.CapsuleHeight;
+            }
+            else
+            {
+                window.Width = targetBounds.Width;
+                window.Height = targetBounds.Height;
+            }
+            if (!snapTileBounds.HasValue && window.TryRestoreRememberedDeepCapsuleExpandedGeometry())
+            {
+                snapTileBounds = null;
+            }
+            // To prevent a 1-frame DWM cache flash when a window's size changes while hidden,
+            // we show it fully transparent first, then restore opacity after layout is complete.
+            double originalOpacity = window.Opacity;
+            window.ShowActivated = activate;
+            window.Opacity = 0;
+            window.Show();
+
+            window.Dispatcher.InvokeAsync(() =>
+            {
+                if (!paper.IsVisible ||
+                    window.IsClosed ||
+                    !IsVisibilityAnimationCurrent(paper.Id, visibilityVersion) ||
+                    !_windows.TryGetValue(paper.Id, out var currentWindow) ||
+                    !ReferenceEquals(currentWindow, window))
+                {
+                    return;
+                }
+
+                if (snapTileBounds is Rect snapTile)
+                {
+                    window.RestoreSnapTilePresentation(snapTile);
+                }
+
+                // A retracted collapse-all capsule must stay at Opacity 0; restoring it here
+                // would un-hide it behind the master pill on restart.
+                if (window.IsCollapseAllRetracted)
+                {
+                    return;
+                }
+
+                // 显示动画：淡入
+                if (State.EnableAnimations && originalOpacity > 0)
+                {
+                    var fadeIn = new System.Windows.Media.Animation.DoubleAnimation(0, originalOpacity, TimeSpan.FromMilliseconds(200))
+                    {
+                        EasingFunction = AnimationHelper.QuickEase
+                    };
+                    window.BeginAnimation(Window.OpacityProperty, fadeIn);
+                }
+                else
+                {
+                    window.Opacity = originalOpacity;
+                }
+            }, System.Windows.Threading.DispatcherPriority.Render);
+        }
+        else if (showAsDeepCapsuleOnly && window.IsVisible)
+        {
+            window.HideMainWindowForDeepCapsuleMode();
+        }
+
+        if (activate && FullscreenAvoidanceWindowFor(window) == IntPtr.Zero && window.IsVisible)
+        {
+            window.Activate();
+        }
+        if (!_isRestoringStartupPapers &&
+            !_isRestoringRuntimePaperBatch &&
+            State.UseCapsuleMode &&
+            State.UseDeepCapsuleMode &&
+            ShouldPaperOccupyDeepCapsuleSlot(paper, window))
+        {
+            ArrangeDeepCapsules(animate: State.EnableAnimations);
+        }
+        if (showAsDeepCapsuleOnly &&
+            !window.IsShellBuilt &&
+            !_isRestoringRuntimePaperBatch)
+        {
+            ScheduleDeferredShellPrewarm(paper, window);
+        }
+        RefreshTrayMenu();
+        if (!_suppressDirty) RefreshTodoRowsForLinkedPaper(paper.Id);
+        MarkDirty();
+    }
+
+    private static void ForceWindowToFront(PaperWindow window)
+    {
+        RestoreWindowIfMinimized(window);
+        Current.RefreshTopmostForForegroundWindow(forceGlobalScan: true);
+        if (Current.FullscreenAvoidanceWindowFor(window) != IntPtr.Zero)
+        {
+            return;
+        }
+
+        window.Topmost = true;
+        window.Activate();
+        window.Focus();
+        window.Dispatcher.BeginInvoke(
+            () =>
+            {
+                if (!window.IsClosed && window.IsVisible)
+                {
+                    // Recompute from current app/fullscreen/pin state. Restoring a captured bool
+                    // can overwrite a setting changed while this dispatcher pulse was pending.
+                    window.RefreshEffectiveTopmost();
+                }
+            },
+            DispatcherPriority.ApplicationIdle);
+    }
+
+    private static void ForceWindowToFrontWithEmphasis(PaperWindow window, AppState state)
+    {
+        ForceWindowToFront(window);
+
+        // 强调动画：轻微弹跳
+        if (state.EnableAnimations && window.IsVisible)
+        {
+            window.Dispatcher.InvokeAsync(() =>
+            {
+                if (!window.IsClosed && window.IsVisible && !window.IsDeepCapsulePlaced)
+                {
+                    AnimationHelper.QuickBounce(window, 1.03, 100);
+                }
+            }, DispatcherPriority.Render);
+        }
+    }
+
+    public void BringPaperToFront(PaperData paper)
+    {
+        if (!_windows.TryGetValue(paper.Id, out var window) || !window.IsVisible)
+        {
+            if (paper.IsVisible &&
+                window?.IsExperimentalTetherPresentationSuppressed == true)
+            {
+                ShowPaper(paper);
+            }
+            else if (paper.IsVisible && window?.IsDeepCapsuleSlotVisible == true)
+            {
+                ShowPaper(paper);
+            }
+            return;
+        }
+
+        RestoreWindowIfMinimized(window);
+        if (!paper.IsCollapsed)
+        {
+            window.EnsureExpandedSurfaceGeometry();
+        }
+        ForceWindowToFrontWithEmphasis(window, State);
+    }
+
+    private static void RestoreWindowIfMinimized(Window window)
+    {
+        if (window.WindowState == WindowState.Minimized)
+        {
+            SystemCommands.RestoreWindow(window);
+        }
+    }
+
+    private void RefreshFullscreenAvoidanceRuntime()
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        if (!ShouldAvoidFullscreenTopmost)
+        {
+            StopFullscreenAvoidanceRuntime(restoreTopmost: true);
+            return;
+        }
+
+        _fullscreenForegroundWindowWatcher ??=
+            new FullscreenForegroundWindowWatcher(QueueFullscreenForegroundRefresh);
+        _lastFullscreenGlobalScanAt = DateTimeOffset.MinValue;
+        RefreshTopmostForForegroundWindow(forceGlobalScan: true);
+        _topmostRefreshTimer.Start();
+    }
+
+    private void StopFullscreenAvoidanceRuntime(bool restoreTopmost)
+    {
+        _topmostRefreshTimer.Stop();
+        _fullscreenEventDebounceTimer.Stop();
+        _ = Interlocked.Exchange(ref _fullscreenEventForceGlobalScan, 0);
+        _fullscreenForegroundWindowWatcher?.Dispose();
+        _fullscreenForegroundWindowWatcher = null;
+        _lastFullscreenGlobalScanAt = DateTimeOffset.MinValue;
+        _fullscreenAvoidanceWindow = IntPtr.Zero;
+        _fullscreenAvoidanceMonitorDeviceName = "";
+
+        if (!restoreTopmost)
+        {
+            return;
+        }
+
+        foreach (var window in _windows.Values)
+        {
+            window.RefreshEffectiveTopmost();
+        }
+        foreach (var m in _masterCapsules.Values)
+        {
+            m.RefreshEffectiveTopmost();
+        }
+    }
+
+    private void QueueFullscreenForegroundRefresh(bool forceGlobalScan)
+    {
+        if (IsExiting || !ShouldAvoidFullscreenTopmost)
+        {
+            return;
+        }
+
+        if (forceGlobalScan)
+        {
+            _ = Interlocked.Exchange(ref _fullscreenEventForceGlobalScan, 1);
+        }
+
+        var dispatcher = _fullscreenEventDebounceTimer.Dispatcher;
+        if (!dispatcher.CheckAccess())
+        {
+            dispatcher.BeginInvoke(
+                (Action)RestartFullscreenEventDebounce,
+                DispatcherPriority.Background);
+            return;
+        }
+
+        RestartFullscreenEventDebounce();
+    }
+
+    private void RestartFullscreenEventDebounce()
+    {
+        if (IsExiting || !ShouldAvoidFullscreenTopmost)
+        {
+            return;
+        }
+
+        _fullscreenEventDebounceTimer.Stop();
+        _fullscreenEventDebounceTimer.Start();
+    }
+
+    private void RefreshTopmostForForegroundWindow(bool forceGlobalScan = false)
+    {
+        var avoidanceWindow = IntPtr.Zero;
+        var avoidanceMonitorDeviceName = "";
+        if (ShouldAvoidFullscreenTopmost)
+        {
+            var now = DateTimeOffset.UtcNow;
+            var allowGlobalScan = forceGlobalScan ||
+                now - _lastFullscreenGlobalScanAt >= TimeSpan.FromSeconds(5);
+            if (allowGlobalScan)
+            {
+                _lastFullscreenGlobalScanAt = now;
+            }
+
+            if (FullscreenForegroundWindowDetector.TryGetFullscreenWindow(out var fullscreenWindow, allowGlobalScan))
+            {
+                avoidanceWindow = fullscreenWindow;
+                WindowWorkAreaHelper.TryGetMonitorDeviceName(
+                    fullscreenWindow,
+                    out avoidanceMonitorDeviceName);
+            }
+        }
+
+        var avoidanceWindowChanged = avoidanceWindow != _fullscreenAvoidanceWindow;
+        var avoidanceMonitorChanged = !string.Equals(
+            avoidanceMonitorDeviceName,
+            _fullscreenAvoidanceMonitorDeviceName,
+            StringComparison.OrdinalIgnoreCase);
+        if (!avoidanceWindowChanged && !avoidanceMonitorChanged)
+        {
+            return;
+        }
+
+        _fullscreenAvoidanceWindow = avoidanceWindow;
+        _fullscreenAvoidanceMonitorDeviceName = avoidanceMonitorDeviceName;
+        foreach (var window in _windows.Values)
+        {
+            window.RefreshEffectiveTopmost();
+        }
+        foreach (var m in _masterCapsules.Values) m.RefreshEffectiveTopmost();
+    }
+
+    private void RefreshTopmostAfterSystemResume()
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        Application.Current.Dispatcher.BeginInvoke(
+            (Action)(() =>
+            {
+                RefreshTopmostForForegroundWindow();
+                foreach (var window in _windows.Values)
+                {
+                    window.RefreshEffectiveTopmost();
+                }
+                foreach (var m in _masterCapsules.Values)
+                {
+                    m.RefreshEffectiveTopmost();
+                }
+            }),
+            DispatcherPriority.ApplicationIdle);
+    }
+
+    internal void ScheduleDisplayMetricsRefresh()
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        WindowWorkAreaHelper.InvalidateMonitorGeometryCache();
+        var dispatcher = _displayMetricsRefreshTimer.Dispatcher;
+        if (dispatcher.CheckAccess())
+        {
+            RestartDisplayMetricsRefreshTimer();
+            return;
+        }
+
+        dispatcher.BeginInvoke(
+            (Action)RestartDisplayMetricsRefreshTimer,
+            DispatcherPriority.Background);
+    }
+
+    private void RestartDisplayMetricsRefreshTimer()
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        _displayMetricsRefreshTimer.Stop();
+        _displayMetricsRefreshState = DisplayMetricsRefreshState.Scheduled;
+        _displayMetricsRefreshTimer.Start();
+    }
+
+    private void RefreshAfterDisplayMetricsChanged()
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        // Scheduling invalidates immediately, but an early per-window reconcile can repopulate the
+        // cache before Windows finishes a topology change. Invalidate again at execution time and
+        // capture one fresh monitor snapshot for every queue in this settle pass.
+        WindowWorkAreaHelper.InvalidateMonitorGeometryCache();
+        RefreshTopmostForForegroundWindow();
+        if (HasDeepCapsuleReorderDragInProgress())
+        {
+            DeferDisplayMetricsRefreshUntilDeepCapsuleDragEnds();
+        }
+        else
+        {
+            _displayMetricsRefreshState = DisplayMetricsRefreshState.Idle;
+            _ = WindowWorkAreaHelper.ConnectedMonitorGeometries();
+            foreach (var window in _windows.Values)
+            {
+                window.InvalidateEdgeCapsuleDisplayMetrics();
+            }
+            RefreshExperimentalAttachmentsAfterDisplayMetrics();
+            ArrangeDeepCapsules(animate: false);
+        }
+        foreach (var window in _windows.Values)
+        {
+            window.RefreshEffectiveTopmost();
+        }
+        foreach (var m in _masterCapsules.Values)
+        {
+            m.RefreshEffectiveTopmost();
+        }
+        RefreshSettingsWindowContent();
+    }
+
+    private bool HasDeepCapsuleReorderDragInProgress()
+        => _windows.Values.Any(window => window.IsDeepCapsuleReorderDragInProgress);
+
+    internal void BeginDeepCapsuleReorderDrag(PaperData draggedPaper)
+    {
+        foreach (var entry in _windows)
+        {
+            if (string.Equals(entry.Key, draggedPaper.Id, StringComparison.Ordinal))
+            {
+                entry.Value.NotifyEdgeCapsulePeerReorderFinished();
+            }
+            else
+            {
+                entry.Value.NotifyEdgeCapsulePeerReorderStarted();
+            }
+        }
+    }
+
+    internal void DeferDisplayMetricsRefreshUntilDeepCapsuleDragEnds()
+    {
+        if (!IsExiting)
+        {
+            _displayMetricsRefreshTimer.Stop();
+            _displayMetricsRefreshState = DisplayMetricsRefreshState.DeferredForCapsuleDrag;
+        }
+    }
+
+    internal void CompleteDeepCapsuleReorderDrag()
+    {
+        if (IsExiting || HasDeepCapsuleReorderDragInProgress())
+        {
+            return;
+        }
+
+        foreach (var window in _windows.Values)
+        {
+            window.NotifyEdgeCapsulePeerReorderFinished();
+        }
+
+        if (_displayMetricsRefreshState == DisplayMetricsRefreshState.DeferredForCapsuleDrag)
+        {
+            // Commit the accumulated queue move before the floating drag HWND is destroyed. The
+            // delayed display refresh remains as a second pass after WPF finishes its DPI hand-off.
+            _displayMetricsRefreshState = DisplayMetricsRefreshState.Idle;
+            FlushPendingDeepCapsuleArrange();
+            ScheduleDisplayMetricsRefresh();
+            return;
+        }
+
+        FlushPendingDeepCapsuleArrange();
+    }
+
+    private void FlushPendingDeepCapsuleArrange()
+    {
+        if (IsExiting || HasDeepCapsuleReorderDragInProgress() || !_deepCapsuleArrangeGate.HasPending)
+        {
+            return;
+        }
+
+        ArrangeDeepCapsules();
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        ScheduleDisplayMetricsRefresh();
+    }
+
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode is PowerModes.Resume or PowerModes.StatusChange)
+        {
+            RefreshTopmostAfterSystemResume();
+        }
+        if (e.Mode == PowerModes.Resume)
+        {
+            RequestImmediateTodoReminderCheck();
+        }
+    }
+
+    private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+    {
+        if (e.Reason is SessionSwitchReason.SessionUnlock or SessionSwitchReason.ConsoleConnect or SessionSwitchReason.RemoteConnect)
+        {
+            RefreshTopmostAfterSystemResume();
+            RequestImmediateTodoReminderCheck();
+        }
+    }
+
+
+    public void RefreshFloatingSurfaceZOrder()
+    {
+        foreach (var window in _windows.Values)
+        {
+            window.RefreshDeepCapsuleSlotTopmost();
+        }
+        foreach (var m in _masterCapsules.Values) m.RefreshEffectiveTopmost();
+    }
+
+    public void SetDeepCapsuleContextMenuOpen(string paperId, bool open)
+    {
+        if (string.IsNullOrWhiteSpace(paperId))
+        {
+            return;
+        }
+
+        var changed = open
+            ? _deepCapsuleContextMenuOwners.Add(paperId)
+            : _deepCapsuleContextMenuOwners.Remove(paperId);
+        if (changed)
+        {
+            RefreshFloatingSurfaceZOrder();
+        }
+    }
+
+    public void HidePaper(PaperData paper)
+    {
+        _startupDisplayDeferredPapers.Remove(paper);
+        InvalidateVisibilityShortcutSnapshotForExternalCommand();
+        _windows.TryGetValue(paper.Id, out var window);
+        if (window != null)
+        {
+            RestoreExperimentalPassiveForWindow(window);
+        }
+        window?.PrepareForHide();
+        paper.IsVisible = false;
+        var visibilityVersion = NextVisibilityAnimationVersion(paper.Id);
+
+        if (window != null)
+        {
+            if (!paper.IsCollapsed && !window.IsDeepCapsulePlaced)
+            {
+                window.SaveGeometryForCurrentPresentation();
+            }
+            window.DetachFromDeepCapsuleStack(animate: State.EnableAnimations);
+
+            // 隐藏动画：淡出
+            if (State.EnableAnimations && window.IsVisible)
+            {
+                var fadeOut = new System.Windows.Media.Animation.DoubleAnimation(window.Opacity, 0, TimeSpan.FromMilliseconds(150))
+                {
+                    EasingFunction = AnimationHelper.QuickEase
+                };
+                fadeOut.Completed += (s, e) =>
+                {
+                    window.BeginAnimation(Window.OpacityProperty, null);
+                    window.Opacity = 1;
+                    if (paper.IsVisible ||
+                        window.IsClosed ||
+                        !IsVisibilityAnimationCurrent(paper.Id, visibilityVersion) ||
+                        !_windows.TryGetValue(paper.Id, out var currentWindow) ||
+                        !ReferenceEquals(currentWindow, window))
+                    {
+                        return;
+                    }
+
+                    window.HideWithoutGeometrySave();
+                    window.ReleaseHiddenNoteImages();
+                };
+                window.BeginAnimation(Window.OpacityProperty, fadeOut);
+            }
+            else
+            {
+                window.BeginAnimation(Window.OpacityProperty, null);
+                window.Opacity = 1;
+                window.HideWithoutGeometrySave();
+                window.ReleaseHiddenNoteImages();
+            }
+        }
+
+        ArrangeDeepCapsules(animate: State.EnableAnimations);
+        RefreshTrayMenu();
+        RefreshTodoRowsForLinkedPaper(paper.Id);
+        MarkDirty();
+    }
+
+    public void ShowAllPapers()
+    {
+        InvalidateVisibilityShortcutSnapshotForExternalCommand();
+        ShowPapersBatch(State.Papers.ToList());
+    }
+
+    private void ShowPapersBatch(IReadOnlyList<PaperData> papersToShow)
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        // Explicit show-all supersedes delayed monitor recovery as well as staged surfaces.
+        CancelStartupDisplayRestore();
+        _paperSurfaceRestoreGeneration++;
+        _startupShellPrewarmGeneration++;
+        _isPreparingStartupEdgeCapsules = false;
+        EnsurePapersOnScreen();
+
+        // Runtime show-all and shortcut restore deliberately share this path so remembered expanded
+        // geometry wins before edge placement. Shortcut restore only filters which papers enter it.
+        var wasSuppressingDirty = _suppressDirty;
+        var wasRestoringRuntimePaperBatch = _isRestoringRuntimePaperBatch;
+        _suppressDirty = true;
+        _trayRefreshSuppressionDepth++;
+        _isRestoringRuntimePaperBatch = true;
+        try
+        {
+            var activationPaper = papersToShow.LastOrDefault(paper =>
+                !(State.UseCapsuleMode && State.UseDeepCapsuleMode && paper.IsCollapsed && CanPaperDisplayAsCapsule(paper)));
+            foreach (var paper in papersToShow)
+            {
+                ShowPaper(paper, activate: ReferenceEquals(paper, activationPaper));
+            }
+        }
+        finally
+        {
+            _isRestoringRuntimePaperBatch = wasRestoringRuntimePaperBatch;
+            _trayRefreshSuppressionDepth--;
+            _suppressDirty = wasSuppressingDirty;
+        }
+
+        ArrangeDeepCapsules(animate: State.EnableAnimations);
+        ScheduleStartupShellPrewarm(papersToShow);
+        RefreshAllTodoRowsForPaperVisibility();
+        RefreshTrayMenu();
+        MarkDirty();
+    }
+
+    private void RefreshAllTodoRowsForPaperVisibility()
+    {
+        foreach (var paper in State.Papers.Where(paper => paper.Type == PaperTypes.Todo))
+        {
+            if (_windows.TryGetValue(paper.Id, out var window))
+            {
+                window.RefreshTodoRowsForExternalChange();
+            }
+        }
+    }
+
+    public void HideAllPapers()
+    {
+        CancelStartupDisplayRestore();
+        InvalidateVisibilityShortcutSnapshotForExternalCommand();
+        _paperSurfaceRestoreGeneration++;
+        _isPreparingStartupEdgeCapsules = false;
+
+        foreach (var window in _windows.Values)
+        {
+            RestoreExperimentalPassiveForWindow(window);
+            window.PrepareForHide();
+        }
+
+        foreach (var paper in State.Papers)
+        {
+            paper.IsVisible = false;
+        }
+
+        foreach (var window in _windows.Values)
+        {
+            // Fully detach from the stack, not just the expanded reservation: a docked collapsed
+            // capsule shows its own slot-host window that a reservation-only clear leaves on screen.
+            window.DetachFromDeepCapsuleStack();
+            window.HideWithoutGeometrySave();
+            window.ReleaseHiddenNoteImages();
+        }
+
+        // Linked-paper buttons cache whether their target currently has an expanded surface.
+        RefreshAllTodoRowsForPaperVisibility();
+
+        ArrangeDeepCapsules();
+        RefreshTrayMenu();
+        MarkDirty();
+    }
+
+    public void DeletePaper(PaperData paper)
+    {
+        paper.IsVisible = false;
+        NextVisibilityAnimationVersion(paper.Id);
+
+        if (_windows.TryGetValue(paper.Id, out var window))
+        {
+            RestoreExperimentalPassiveForWindow(window);
+            window.CloseForReal();
+            _windows.Remove(paper.Id);
+        }
+
+        State.Papers.RemoveAll(p => p.Id == paper.Id);
+        QueuePluginPaperStateDeletion(paper.Id);
+        _visibilityAnimationVersions.Remove(paper.Id);
+        NotifyTodoReminderCollectionChanged();
+
+        ClearTodoLinksToPaper(paper.Id);
+
+        if (State.Papers.Count == 0)
+        {
+            _trayRefreshSuppressionDepth++;
+            try
+            {
+                CreatePaper(PaperTypes.Todo, show: true);
+            }
+            finally
+            {
+                _trayRefreshSuppressionDepth--;
+            }
+        }
+
+        ArrangeDeepCapsules();
+        RefreshTrayMenu();
+        SaveNow();
+    }
+
+    private void ClearTodoLinksToPaper(string linkedPaperId)
+    {
+        var affectedPaperIds = new HashSet<string>();
+
+        foreach (var paper in State.Papers.Where(p => p.Type == PaperTypes.Todo))
+        {
+            foreach (var item in paper.Items)
+            {
+                if (!string.Equals(item.LinkedPaperId, linkedPaperId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                item.ClearQuickLaunch();
+                affectedPaperIds.Add(paper.Id);
+            }
+        }
+
+        foreach (var paperId in affectedPaperIds)
+        {
+            if (_windows.TryGetValue(paperId, out var todoWindow))
+            {
+                todoWindow.RefreshTodoRowsForExternalChange();
+            }
+        }
+
+        RefreshCapsuleEligibilityForLinkedPapers();
+    }
+
+    public void RefreshCapsuleEligibilityForLinkedPapers()
+    {
+        foreach (var window in _windows.Values)
+        {
+            window.RefreshAssociationButton();
+            window.RefreshCapsuleEligibility();
+        }
+
+        ArrangeDeepCapsules(animate: State.EnableAnimations);
+        RefreshTrayMenu();
+    }
+
+    public void RefreshCapsuleEligibilityForLinkedPaper(string? paperId)
+        => RefreshCapsuleEligibilityForLinkedPapers([paperId]);
+
+    public void RefreshCapsuleEligibilityForLinkedPapers(IEnumerable<string?> paperIds)
+    {
+        var linkedPaperIds = paperIds
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id!)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        foreach (var paperId in linkedPaperIds)
+        {
+            if (_windows.TryGetValue(paperId, out var paperWindow))
+            {
+                paperWindow.RefreshAssociationButton();
+            }
+        }
+
+        if (!State.EnableTodoPaperLinks ||
+            !State.HideLinkedPapersFromCapsules ||
+            !State.UseCapsuleMode)
+        {
+            return;
+        }
+
+        var refreshedAny = false;
+        foreach (var paperId in linkedPaperIds)
+        {
+            var paper = FindPaper(paperId);
+            if (paper == null)
+            {
+                continue;
+            }
+
+            refreshedAny = true;
+            if (_windows.TryGetValue(paper.Id, out var paperWindow))
+            {
+                paperWindow.RefreshCapsuleEligibility();
+            }
+        }
+
+        if (!refreshedAny)
+        {
+            return;
+        }
+
+        ArrangeDeepCapsules(animate: State.EnableAnimations);
+        RefreshTrayMenu();
+    }
+
+    public bool IsPaperEmpty(PaperData paper)
+    {
+        if (paper.Type == PaperTypes.Note)
+        {
+            if (!string.Equals(
+                    paper.BodyProviderId,
+                    PaperBodyProviderIds.Markdown,
+                    StringComparison.Ordinal))
+            {
+                return false;
+            }
+            return _windows.TryGetValue(paper.Id, out var window)
+                ? window.IsCurrentNoteEmpty()
+                : string.IsNullOrWhiteSpace(paper.Content);
+        }
+
+        return !paper.Items.Any(TodoRules.HasMeaningfulContent);
+    }
+
+    public int VisibleDeepCapsuleCount()
+    {
+        return DeepCapsulePapersInOrder().Count;
+    }
+
+    // Count of capsules in only the given paper's (monitor, edge) queue.
+    public int VisibleDeepCapsuleCountForQueue(PaperData target)
+    {
+        var key = QueueKey(target);
+        return DeepCapsulePapersInOrder().Count(p => QueueKey(p) == key);
+    }
+
+    public double VisibleDeepCapsuleRestingWidth()
+    {
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode)
+        {
+            return 0;
+        }
+
+        double width = 0;
+        foreach (var paper in DeepCapsulePapersInOrder())
+        {
+            if (_windows.TryGetValue(paper.Id, out var window))
+            {
+                width = Math.Max(width, window.DeepCapsuleRestingVisibleWidth);
+            }
+        }
+
+        return width;
+    }
+
+    // Widest resting capsule in ONLY the queue that the given paper belongs to. Used to reserve
+    // expanded-window edge inset per queue, so a long title on another screen/edge doesn't push
+    // this paper's expanded window away from its own wall.
+    public double VisibleDeepCapsuleRestingWidthForQueue(PaperData target)
+    {
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode)
+        {
+            return 0;
+        }
+
+        var targetKey = QueueKey(target);
+        double width = 0;
+        foreach (var paper in DeepCapsulePapersInOrder())
+        {
+            if (QueueKey(paper) != targetKey)
+            {
+                continue;
+            }
+            if (_windows.TryGetValue(paper.Id, out var window))
+            {
+                width = Math.Max(width, window.DeepCapsuleRestingVisibleWidth);
+            }
+        }
+
+        if (State.UseCapsuleCollapseAll)
+        {
+            var queueCount = DeepCapsulePapersInOrder().Count(p => QueueKey(p) == targetKey);
+            if (queueCount > 0)
+            {
+                // During the first arrange the master HWND does not exist yet, so reserve the
+                // standard pill width. Subsequent layouts use the master's actual localized,
+                // DPI-aware text width.
+                var masterWidth = _masterCapsules.TryGetValue(targetKey, out var master)
+                    ? master.DesiredDockedWidth
+                    : PaperLayoutDefaults.CapsuleWidth;
+                width = Math.Max(width, masterWidth);
+            }
+        }
+
+        return width;
+    }
+
+    // Reorder a capsule WITHIN its own (monitor, edge) queue. targetIndex is an index into that
+    // queue's members (matching the per-queue slot the drop landed on), NOT the global capsule
+    // list — with multiple queues those differ, so a global reorder would mis-place the capsule.
+    public void ReorderDeepCapsule(PaperData paper, int targetIndex)
+    {
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode)
+        {
+            return;
+        }
+
+        var queueKey = QueueKey(paper);
+        var queueMembers = DeepCapsulePapersInOrder().Where(p => QueueKey(p) == queueKey).ToList();
+        var currentIndex = queueMembers.FindIndex(p => p.Id == paper.Id);
+        if (currentIndex < 0 || queueMembers.Count == 0)
+        {
+            return;
+        }
+
+        targetIndex = Math.Clamp(targetIndex, 0, queueMembers.Count - 1);
+        if (targetIndex == currentIndex)
+        {
+            ArrangeDeepCapsules(animate: true);
+            return;
+        }
+
+        var draggedPaper = queueMembers[currentIndex];
+        queueMembers.RemoveAt(currentIndex);
+        targetIndex = Math.Clamp(targetIndex, 0, queueMembers.Count);
+        queueMembers.Insert(targetIndex, draggedPaper);
+
+        // Rebuild State.Papers: the slots occupied by THIS queue's members get refilled in the new
+        // order; every other paper (other queues, non-capsule papers) stays exactly in place.
+        var queueIds = new HashSet<string>(queueMembers.Select(p => p.Id), StringComparer.Ordinal);
+        var reorderedPapers = new List<PaperData>(State.Papers.Count);
+        var cursor = 0;
+        foreach (var existing in State.Papers)
+        {
+            if (queueIds.Contains(existing.Id))
+            {
+                reorderedPapers.Add(queueMembers[cursor]);
+                cursor++;
+            }
+            else
+            {
+                reorderedPapers.Add(existing);
+            }
+        }
+
+        State.Papers = reorderedPapers;
+        ArrangeDeepCapsules(animate: true);
+        RefreshTrayMenu();
+        MarkDirty();
+    }
+
+    public void PreviewDeepCapsuleReorder(PaperData paper, int targetIndex)
+    {
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode)
+        {
+            return;
+        }
+
+        var queueKey = QueueKey(paper);
+        var queueMembers = DeepCapsulePapersInOrder().Where(p => QueueKey(p) == queueKey).ToList();
+        var currentIndex = queueMembers.FindIndex(p => p.Id == paper.Id);
+        if (currentIndex < 0 || queueMembers.Count <= 1)
+        {
+            return;
+        }
+
+        targetIndex = Math.Clamp(targetIndex, 0, queueMembers.Count - 1);
+        var draggedPaper = queueMembers[currentIndex];
+        queueMembers.RemoveAt(currentIndex);
+        targetIndex = Math.Clamp(targetIndex, 0, queueMembers.Count);
+        queueMembers.Insert(targetIndex, draggedPaper);
+
+        var plan = EdgeCapsuleQueueCoordinator.Build(
+            queueMembers.Select(member => new EdgeCapsuleQueueMember(member, queueKey)),
+            State.UseCapsuleCollapseAll);
+        if (plan.Queues.Count == 0)
+        {
+            return;
+        }
+        if (plan.Queues[0].HasMaster && IsCapsuleCollapseAllActiveForQueue(queueKey))
+        {
+            return;
+        }
+
+        foreach (var member in queueMembers)
+        {
+            if (member.Id == paper.Id ||
+                !_windows.TryGetValue(member.Id, out var window) ||
+                !ShouldPaperOccupyDeepCapsuleSlot(member, window))
+            {
+                continue;
+            }
+
+            window.PreviewDeepCapsulePlacement(plan.Placements[member.Id]);
+        }
+    }
+
+    // Reassign a capsule to a different (monitor, edge) queue — the cross-edge / cross-monitor
+    // drag. The paper keeps its identity; only its queue tag + position among the target queue's
+    // members change. Order within State.Papers is rebuilt so the dragged paper lands at the slot
+    // matching the drop height in the target queue.
+    internal void MoveCapsuleToQueue(
+        PaperData paper,
+        string monitorDeviceName,
+        string side,
+        DeviceScreenPoint dropPoint)
+    {
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode)
+        {
+            return;
+        }
+
+        var normalizedSide = DeepCapsuleSides.Normalize(side);
+        var normalizedMonitor = WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(monitorDeviceName);
+        if (!WindowWorkAreaHelper.TryGetMonitorGeometryForDevice(normalizedMonitor, out var monitorGeometry))
+        {
+            return;
+        }
+
+        paper.CapsuleSide = normalizedSide;
+        paper.CapsuleMonitorDeviceName = normalizedMonitor;
+
+        // Members already in the target queue (excluding the dragged paper), in State.Papers order.
+        var targetKey = QueueKey(normalizedMonitor, normalizedSide);
+        var targetMembers = new List<PaperData>();
+        foreach (var p in State.Papers)
+        {
+            if (p.Id == paper.Id || !p.IsVisible)
+            {
+                continue;
+            }
+            if (_windows.TryGetValue(p.Id, out var w) && ShouldPaperOccupyDeepCapsuleSlot(p, w) && QueueKey(p) == targetKey)
+            {
+                targetMembers.Add(p);
+            }
+        }
+
+        // Insertion index by drop height against the target queue's monitor work area.
+        var area = monitorGeometry.LocalWorkAreaDip;
+        var dropY = monitorGeometry.DeviceYToLocalDip(dropPoint.Y);
+        var targetRealCount = targetMembers.Count + 1;
+        var visualOffset = State.UseCapsuleCollapseAll && targetRealCount > 0 ? 1 : 0;
+        var startTop = EdgeCapsuleLayout.NormalizeStartTopMargin(
+            DeepCapsuleStartTopMarginForQueue(normalizedMonitor,
+                normalizedSide == DeepCapsuleSides.Left ? EdgeCapsuleEdge.Left : EdgeCapsuleEdge.Right),
+            area,
+            targetRealCount + visualOffset,
+            DeepCapsuleGap);
+        var slotHeight = EdgeCapsuleLayout.SlotHeight(DeepCapsuleGap);
+        var firstTop = EdgeCapsuleLayout.TopForIndex(
+            visualOffset,
+            startTop,
+            area,
+            targetRealCount + visualOffset,
+            DeepCapsuleGap);
+        var rawIndex = (int)Math.Floor((dropY - firstTop) / slotHeight + 0.5);
+        var insertAt = Math.Clamp(rawIndex, 0, targetMembers.Count);
+
+        // Rebuild State.Papers: drop the dragged paper, then re-insert it right before the target
+        // queue member currently at insertAt (or at the end of that queue's run).
+        var anchorPaper = insertAt < targetMembers.Count ? targetMembers[insertAt] : null;
+        var rebuilt = new List<PaperData>(State.Papers.Count);
+        foreach (var p in State.Papers)
+        {
+            if (p.Id == paper.Id)
+            {
+                continue;
+            }
+            if (anchorPaper != null && p.Id == anchorPaper.Id)
+            {
+                rebuilt.Add(paper);
+            }
+            rebuilt.Add(p);
+        }
+        if (anchorPaper == null)
+        {
+            // Append after the last target-queue member, or at the end if the queue was empty.
+            if (targetMembers.Count > 0)
+            {
+                var lastId = targetMembers[^1].Id;
+                var idx = rebuilt.FindIndex(p => p.Id == lastId);
+                rebuilt.Insert(idx + 1, paper);
+            }
+            else
+            {
+                rebuilt.Add(paper);
+            }
+        }
+
+        State.Papers = rebuilt;
+        ArrangeDeepCapsules(animate: true);
+        RefreshTrayMenu();
+        SaveNow();
+    }
+
+    public void UpdateGeometry(PaperData paper, Window window)
+    {
+        if (window is PaperWindow { SuppressGeometrySave: true })
+        {
+            return;
+        }
+
+        if (window is PaperWindow { UsesNonPaperGeometry: true })
+        {
+            return;
+        }
+
+        if (double.IsNaN(window.Left) || double.IsNaN(window.Top))
+        {
+            return;
+        }
+
+        if (window is PaperWindow paperWindow &&
+            paperWindow.TryGetSnappedPresentationBoundsForGeometrySave(out _))
+        {
+            return;
+        }
+
+        if (State.RememberDeepCapsuleExpandedPosition &&
+            window is PaperWindow { ShouldSaveDeepCapsuleExpandedGeometry: true })
+        {
+            UpdateDeepCapsuleExpandedGeometry(paper, window);
+            return;
+        }
+
+        // While collapsed the window reports capsule geometry. Simple capsule mode
+        // intentionally persists the capsule's own position through paper.X/Y (that is
+        // where ShowPaper restores it from), so position is still saved — but the capsule's
+        // width/height must never overwrite the expanded paper's size.
+        paper.X = Math.Round(window.Left);
+        paper.Y = Math.Round(window.Top);
+        if (!paper.IsCollapsed)
+        {
+            paper.Width = Math.Round(Math.Max(window.ActualWidth > 0 ? window.ActualWidth : window.Width, PaperLayoutDefaults.MinWidth));
+            paper.Height = Math.Round(Math.Max(window.ActualHeight > 0 ? window.ActualHeight : window.Height, PaperLayoutDefaults.MinHeight));
+        }
+        MarkDirty();
+    }
+
+    internal bool TryGetRememberedDeepCapsuleExpandedGeometry(
+        PaperData paper,
+        double fallbackWidth,
+        double fallbackHeight,
+        out PaperRestoreGeometry geometry)
+    {
+        geometry = default;
+        if (!State.RememberDeepCapsuleExpandedPosition ||
+            !paper.DeepCapsuleExpandedX.HasValue ||
+            !paper.DeepCapsuleExpandedY.HasValue ||
+            !paper.DeepCapsuleExpandedWidth.HasValue ||
+            !paper.DeepCapsuleExpandedHeight.HasValue)
+        {
+            return false;
+        }
+
+        var currentSide = DeepCapsuleSides.Normalize(paper.CapsuleSide);
+        var currentMonitor = WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(paper.CapsuleMonitorDeviceName);
+        var rememberedSide = DeepCapsuleSides.Normalize(paper.DeepCapsuleExpandedSide);
+        var rememberedMonitor = WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(paper.DeepCapsuleExpandedMonitorDeviceName);
+        if (rememberedSide != currentSide ||
+            !string.Equals(rememberedMonitor, currentMonitor, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (!IsFinite(paper.DeepCapsuleExpandedX.Value) ||
+            !IsFinite(paper.DeepCapsuleExpandedY.Value))
+        {
+            return false;
+        }
+
+        // The remembered monitor/side identify the edge queue that owns this memory, not
+        // the screen the expanded paper must stay on. Resolve that screen from the saved
+        // paper rectangle before clamping, so cross-monitor positions can be restored.
+        var rememberedWidth = ClampPaperDimension(
+            paper.DeepCapsuleExpandedWidth.Value,
+            fallbackWidth,
+            PaperLayoutDefaults.MinWidth,
+            double.MaxValue);
+        var rememberedHeight = ClampPaperDimension(
+            paper.DeepCapsuleExpandedHeight.Value,
+            fallbackHeight,
+            PaperLayoutDefaults.MinHeight,
+            double.MaxValue);
+        var rememberedRect = new Rect(
+            paper.DeepCapsuleExpandedX.Value,
+            paper.DeepCapsuleExpandedY.Value,
+            rememberedWidth,
+            rememberedHeight);
+        // Old data did not capture DPI and cannot disambiguate every mixed-DPI position.
+        // Keep its system-DPI interpretation until a real expanded HWND supplies a new snapshot.
+        var savedScale = paper.DeepCapsuleExpandedDpiScale is double scale && double.IsFinite(scale) && scale > 0
+            ? scale
+            : WindowWorkAreaHelper.SystemDpiScale().ScaleX;
+        if (!PaperRestoreGeometry.TryGetDeviceBounds(rememberedRect, savedScale, out var deviceBounds) ||
+            !WindowWorkAreaHelper.TryGetMonitorGeometryForDeviceBounds(deviceBounds, out var monitor))
+        {
+            return false;
+        }
+
+        geometry = PaperRestoreGeometry.ClampToMonitor(deviceBounds, rememberedWidth, rememberedHeight, monitor);
+        return true;
+    }
+
+    private void UpdateDeepCapsuleExpandedGeometry(PaperData paper, Window window)
+    {
+        if (!WindowNative.TryGetWindowDeviceBounds(window, out var bounds) ||
+            !WindowWorkAreaHelper.TryGetMonitorGeometryForWindowHandle(
+                new System.Windows.Interop.WindowInteropHelper(window).Handle, out var monitor))
+        {
+            return;
+        }
+
+        var scale = monitor.DpiScaleX;
+        paper.DeepCapsuleExpandedX = bounds.Left / scale;
+        paper.DeepCapsuleExpandedY = bounds.Top / scale;
+        paper.DeepCapsuleExpandedWidth = Math.Max(bounds.Width / scale, PaperLayoutDefaults.MinWidth);
+        paper.DeepCapsuleExpandedHeight = Math.Max(bounds.Height / scale, PaperLayoutDefaults.MinHeight);
+        paper.DeepCapsuleExpandedDpiScale = scale;
+        paper.DeepCapsuleExpandedSide = DeepCapsuleSides.Normalize(paper.CapsuleSide);
+        paper.DeepCapsuleExpandedMonitorDeviceName = WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(paper.CapsuleMonitorDeviceName);
+        MarkDirty();
+    }
+
+    // A queue is identified by (monitor device, edge). All docked capsules sharing the same
+    // pair form one vertical stack with its own master pill. At runtime, a disconnected monitor
+    // falls back to the primary queue so unplugging a screen cannot leave duplicate masters on
+    // the same physical edge; the paper's persisted monitor tag is left intact for reconnects.
+    private static string LiveQueueMonitorDeviceName(string monitorDeviceName)
+    {
+        var normalized = WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(monitorDeviceName);
+        if (string.IsNullOrEmpty(normalized))
+        {
+            return "";
+        }
+
+        return WindowWorkAreaHelper.WorkAreaForDevice(normalized).HasValue
+            ? normalized
+            : "";
+    }
+
+    private static string QueueKey(string monitorDeviceName, string side)
+        => $"{LiveQueueMonitorDeviceName(monitorDeviceName)}|{(side == DeepCapsuleSides.Left ? DeepCapsuleSides.Left : DeepCapsuleSides.Right)}";
+
+    private static string QueueKey(PaperData paper) => QueueKey(paper.CapsuleMonitorDeviceName, paper.CapsuleSide);
+
+    private bool IsCapsuleCollapseAllActiveForQueue(string queueKey)
+    {
+        return State.CapsuleCollapseAllActiveQueues.TryGetValue(queueKey, out var active) && active;
+    }
+
+
+    private void RemoveStaleCollapseAllActiveQueues(IEnumerable<string> liveQueueKeys)
+    {
+        if (State.CapsuleCollapseAllActiveQueues.Count == 0)
+        {
+            return;
+        }
+
+        var live = liveQueueKeys.ToHashSet(StringComparer.Ordinal);
+        foreach (var staleKey in State.CapsuleCollapseAllActiveQueues.Keys.Where(key => !live.Contains(key)).ToList())
+        {
+            if (TryGetDisconnectedQueueFallbackKey(staleKey, out var fallbackKey) &&
+                live.Contains(fallbackKey) &&
+                State.CapsuleCollapseAllActiveQueues.TryGetValue(staleKey, out var active) &&
+                active)
+            {
+                State.CapsuleCollapseAllActiveQueues[fallbackKey] = true;
+                continue;
+            }
+
+            State.CapsuleCollapseAllActiveQueues.Remove(staleKey);
+        }
+    }
+
+    private bool TryGetDisconnectedQueueFallbackKey(string queueKey, out string fallbackKey)
+    {
+        fallbackKey = "";
+        var separator = queueKey.LastIndexOf('|');
+        if (separator <= 0 || separator >= queueKey.Length - 1)
+        {
+            return false;
+        }
+
+        var monitor = WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(queueKey[..separator]);
+        if (string.IsNullOrEmpty(monitor) || WindowWorkAreaHelper.WorkAreaForDevice(monitor).HasValue)
+        {
+            return false;
+        }
+
+        var side = queueKey[(separator + 1)..] == DeepCapsuleSides.Left
+            ? DeepCapsuleSides.Left
+            : DeepCapsuleSides.Right;
+        if (!DeepCapsulePapersInOrder().Any(p =>
+                string.Equals(WindowWorkAreaHelper.NormalizeQueueMonitorDeviceName(p.CapsuleMonitorDeviceName), monitor, StringComparison.Ordinal) &&
+                DeepCapsuleSides.Normalize(p.CapsuleSide) == side))
+        {
+            return false;
+        }
+
+        fallbackKey = QueueKey("", side);
+        return true;
+    }
+
+
+    public void ArrangeDeepCapsules(
+        bool animate = false,
+        bool flushInitialPresentations = false)
+    {
+        if (HasDeepCapsuleReorderDragInProgress())
+        {
+            _deepCapsuleArrangeGate.Defer(animate);
+            return;
+        }
+
+        animate = _deepCapsuleArrangeGate.Consume(animate);
+        animate = animate && State.EnableAnimations;
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode)
+        {
+            ResetEdgeCapsulePreviewWithoutArrange();
+            foreach (var window in _windows.Values)
+            {
+                window.DetachFromDeepCapsuleStack();
+            }
+            DestroyAllMasterCapsules();
+            return;
+        }
+
+        var capsulePapers = DeepCapsulePapersInOrder();
+
+        var plan = EdgeCapsuleQueueCoordinator.Build(
+            capsulePapers.Select(paper => new EdgeCapsuleQueueMember(paper, QueueKey(paper))),
+            State.UseCapsuleCollapseAll);
+        plan = ApplyEdgeCapsulePreviewLayout(plan);
+        var queueKeys = plan.Queues.Select(queue => queue.Key).ToList();
+        RemoveStaleCollapseAllActiveQueues(queueKeys);
+
+        if (flushInitialPresentations)
+        {
+            // The master owns slot 0, so startup creates it before publishing the real slots.
+            // Suppress its standalone fade so the complete queue reaches the first frame together.
+            SyncMasterCapsules(plan, animate: false);
+        }
+
+        foreach (var paper in State.Papers)
+        {
+            if (!_windows.TryGetValue(paper.Id, out var window))
+            {
+                continue;
+            }
+
+            if (ShouldPaperOccupyDeepCapsuleSlot(paper, window))
+            {
+                var key = QueueKey(paper);
+                if (!plan.Placements.TryGetValue(paper.Id, out var placement))
+                {
+                    window.DetachFromDeepCapsuleStack();
+                    continue;
+                }
+                var retracted = placement.VisualOffset > 0 && IsCapsuleCollapseAllActiveForQueue(key);
+                if (retracted)
+                {
+                    window.RetractIntoMaster(placement, animate);
+                }
+                else if (paper.IsCollapsed)
+                {
+                    window.ApplyDeepCapsulePlacement(placement, animate);
+                }
+                else
+                {
+                    window.ApplyExpandedDeepCapsuleSlotPlacement(
+                        placement,
+                        animate,
+                        deferInitialPresentation: flushInitialPresentations);
+                }
+            }
+            else
+            {
+                if (!paper.IsVisible && window.IsDeepCapsuleLeavingQueue)
+                {
+                    continue;
+                }
+
+                window.DetachFromDeepCapsuleStack();
+            }
+        }
+
+        if (flushInitialPresentations)
+        {
+            foreach (var queue in plan.Queues)
+            {
+                foreach (var paper in queue.Papers)
+                {
+                    if (_windows.TryGetValue(paper.Id, out var window) &&
+                        ShouldPaperOccupyDeepCapsuleSlot(paper, window))
+                    {
+                        window.FlushStartupDeepCapsulePresentation();
+                    }
+                }
+            }
+        }
+
+        if (!flushInitialPresentations)
+        {
+            SyncMasterCapsules(plan, animate);
+        }
+    }
+
+    // Reconcile one master pill per non-empty queue (when collapse-all is on). Creates/updates the
+    // masters for live queues and closes masters whose queue disappeared.
+    private void SyncMasterCapsules(EdgeCapsuleQueuePlan plan, bool animate)
+    {
+        if (!State.UseCapsuleCollapseAll)
+        {
+            DestroyAllMasterCapsules();
+            return;
+        }
+
+        var liveKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var queue in plan.Queues)
+        {
+            var key = queue.Key;
+            var papers = queue.Papers;
+            if (papers.Count == 0)
+            {
+                continue;
+            }
+
+            liveKeys.Add(key);
+            var sample = papers[0];
+            var edge = sample.CapsuleSide == DeepCapsuleSides.Left ? EdgeCapsuleEdge.Left : EdgeCapsuleEdge.Right;
+            var monitor = sample.CapsuleMonitorDeviceName;
+            var retracted = IsCapsuleCollapseAllActiveForQueue(key);
+
+            if (!_masterCapsules.TryGetValue(key, out var master))
+            {
+                master = new MasterCapsuleWindow(this, edge, monitor);
+                _masterCapsules[key] = master;
+                master.SetExperimentalPassive(_experimentalAllSurfacesPassive);
+                master.ShowPlaced(papers.Count, retracted, animate);
+            }
+            else
+            {
+                master.SetQueue(edge, monitor);
+                master.UpdateState(papers.Count, retracted, animate);
+            }
+        }
+
+        if (liveKeys.Count == 0)
+        {
+            DestroyAllMasterCapsules();
+            return;
+        }
+
+        // Close masters for queues that no longer exist.
+        foreach (var staleKey in _masterCapsules.Keys.Where(k => !liveKeys.Contains(k)).ToList())
+        {
+            State.CapsuleCollapseAllActiveQueues.Remove(staleKey);
+            _masterCapsules[staleKey].CloseForReal();
+            _masterCapsules.Remove(staleKey);
+        }
+    }
+
+    private void DestroyAllMasterCapsules()
+    {
+        // Collapsing the masters must never strand retracted capsules off-screen at Opacity 0.
+        if (State.CapsuleCollapseAllActiveQueues.Count > 0)
+        {
+            State.CapsuleCollapseAllActiveQueues.Clear();
+        }
+
+        if (_masterCapsules.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var master in _masterCapsules.Values)
+        {
+            master.CloseForReal();
+        }
+        _masterCapsules.Clear();
+    }
+
+    // Toggle whether the real capsules are retracted behind the master pill.
+    public void ToggleCapsuleCollapseAllActive(string monitorDeviceName, EdgeCapsuleEdge edge)
+    {
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode || !State.UseCapsuleCollapseAll)
+        {
+            return;
+        }
+
+        var side = edge == EdgeCapsuleEdge.Left ? DeepCapsuleSides.Left : DeepCapsuleSides.Right;
+        var key = QueueKey(monitorDeviceName, side);
+        var active = !IsCapsuleCollapseAllActiveForQueue(key);
+        if (active)
+        {
+            State.CapsuleCollapseAllActiveQueues[key] = true;
+        }
+        else
+        {
+            State.CapsuleCollapseAllActiveQueues.Remove(key);
+        }
+        ArrangeDeepCapsules(animate: true);
+        SaveNow();
+    }
+
+    private void ToggleCapsuleCollapseAll()
+    {
+        State.UseCapsuleCollapseAll = !State.UseCapsuleCollapseAll;
+
+        if (!State.UseCapsuleCollapseAll)
+        {
+            State.CapsuleCollapseAllActiveQueues.Clear();
+            ResetDeepCapsuleStartTopMargins();
+        }
+
+        // Collapse-all rides on top of edge-aligned capsules; enabling it implies both prerequisites.
+        if (State.UseCapsuleCollapseAll && (!State.UseCapsuleMode || !State.UseDeepCapsuleMode))
+        {
+            State.UseCapsuleMode = true;
+            State.UseDeepCapsuleMode = true;
+            foreach (var window in _windows.Values)
+            {
+                window.UpdateCapsuleMode();
+                window.UpdateDeepCapsuleMode();
+            }
+        }
+
+        ArrangeDeepCapsules(animate: true);
+        SaveNow();
+        RebuildTrayMenu();
+        RefreshSettingsCapsuleToggleStates();
+    }
+
+    private List<PaperData> DeepCapsulePapersInOrder()
+    {
+        var papers = new List<PaperData>();
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode)
+        {
+            return papers;
+        }
+
+        foreach (var paper in State.Papers)
+        {
+            if (!paper.IsVisible)
+            {
+                continue;
+            }
+
+            if (!_windows.TryGetValue(paper.Id, out var window))
+            {
+                continue;
+            }
+
+            if (ShouldPaperOccupyDeepCapsuleSlot(paper, window))
+            {
+                papers.Add(paper);
+            }
+        }
+
+        return papers;
+    }
+
+    private bool ShouldPaperOccupyDeepCapsuleSlot(PaperData paper, PaperWindow window)
+    {
+        if (!paper.IsVisible ||
+            !CanPaperDisplayAsCapsule(paper) ||
+            window.SuppressesExpandedDeepCapsuleSlot)
+        {
+            return false;
+        }
+
+        if (paper.IsCollapsed)
+        {
+            return true;
+        }
+
+        return State.UseDeepCapsuleMode &&
+            State.ShowDeepCapsuleWhileExpanded &&
+            (window.HasVisibleSurface || _isPreparingStartupEdgeCapsules);
+    }
+
+    public void MarkDirty()
+    {
+        if (IsExiting || _suppressDirty)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _stateRevision);
+        NotifyPluginEventMutationStampChanged();
+        if (!_hasPendingDirty)
+        {
+            _hasPendingDirty = true;
+            _forceSaveTimer.Stop();
+            _forceSaveTimer.Start();
+        }
+
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    public void SaveNow(bool sync = false)
+    {
+        _ = TrySaveNow(sync);
+    }
+
+    private bool TrySaveNow(bool sync)
+    {
+        long? attemptedVersion = null;
+        try
+        {
+            _saveTimer.Stop();
+            _forceSaveTimer.Stop();
+            _hasPendingDirty = false;
+            CommitPendingNoteContentsForSave();
+            var version = Interlocked.Increment(ref _saveVersion);
+            NotifyPluginEventMutationStampChanged();
+            attemptedVersion = version;
+            var stateRevision = Interlocked.Read(ref _stateRevision);
+            var json = _store.SerializeState(State);
+            if (sync)
+            {
+                _store.SaveJsonSync(json, version);
+                if (!IsExiting) TryReleaseUnreferencedImageCache();
+                TryFlushPendingPluginPaperStateDeletes();
+                _hasShownSaveFailure = false;
+            }
+            else
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _store.SaveJsonAsync(json, version);
+                        Application.Current?.Dispatcher?.BeginInvoke(new Action(() =>
+                        {
+                            if (version == Interlocked.Read(ref _saveVersion) &&
+                                stateRevision == Interlocked.Read(ref _stateRevision))
+                            {
+                                TryReleaseUnreferencedImageCache();
+                                TryFlushPendingPluginPaperStateDeletes();
+                            }
+                            _hasShownSaveFailure = false;
+                        }));
+                    }
+                    catch (Exception ex)
+                    {
+                        Application.Current?.Dispatcher?.BeginInvoke(new Action(() =>
+                        {
+                            HandleSaveFailure(ex, version);
+                        }));
+                    }
+                });
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            HandleSaveFailure(ex, attemptedVersion);
+            return false;
+        }
+    }
+
+    internal void CommitPendingNoteContentsForSave()
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher != null && !dispatcher.CheckAccess())
+        {
+            // Note commit touches WPF controls; only run on the UI thread.
+            return;
+        }
+
+        foreach (var window in _windows.Values)
+        {
+            window.CommitPendingNoteContentForSave();
+        }
+    }
+
+    private void TryReleaseUnreferencedImageCache()
+    {
+        try
+        {
+            _imageStore.ReleaseUnreferencedBitmapCache(State);
+        }
+        catch
+        {
+            // Decoded-image cache cleanup is optional; the saved note data remains authoritative.
+        }
+    }
+
+    /// <summary>
+    /// Runs startup GC when protection ids can be collected. Returns that set for free-id reuse,
+    /// or null when collection is skipped/failed so reuse must stay off.
+    /// </summary>
+    private IReadOnlySet<string>? TryCollectUnprotectedImages()
+    {
+        try
+        {
+            if (!_store.TryCollectProtectedImageIds(State, out var protectedImageIds))
+            {
+                return null;
+            }
+
+            _imageStore.CollectUnprotectedImages(protectedImageIds);
+            return protectedImageIds;
+        }
+        catch
+        {
+            // Collection is optional and destructive; any uncertainty keeps the image bytes
+            // and disables free-id reuse for this startup.
+            return null;
+        }
+    }
+
+    private static Style BuildDialogButtonStyle()
+    {
+        var style = new Style(typeof(Button));
+        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(10, 4, 10, 4)));
+        style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
+        style.Setters.Add(new Setter(Control.ForegroundProperty, Theme.TextBrush));
+        style.Setters.Add(new Setter(Control.CursorProperty, Cursors.Hand));
+        style.Setters.Add(new Setter(Control.FontSizeProperty, AppTypography.Scale(13)));
+
+        var border = new FrameworkElementFactory(typeof(Border));
+        border.Name = "Bd";
+        border.SetValue(Border.CornerRadiusProperty, new CornerRadius(6));
+        border.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        border.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
+
+        var content = new FrameworkElementFactory(typeof(ContentPresenter));
+        content.SetValue(ContentPresenter.ContentProperty, new TemplateBindingExtension(ContentControl.ContentProperty));
+        content.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        content.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        border.AppendChild(content);
+
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = border };
+
+        var mouseOver = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        mouseOver.Setters.Add(new Setter(Control.BackgroundProperty, Theme.HoverBrush));
+
+        var pressed = new Trigger { Property = ButtonBase.IsPressedProperty, Value = true };
+        pressed.Setters.Add(new Setter(UIElement.OpacityProperty, 0.7));
+
+        template.Triggers.Add(mouseOver);
+        template.Triggers.Add(pressed);
+        style.Setters.Add(new Setter(Control.TemplateProperty, template));
+
+        return style;
+    }
+
+    private void HandleSaveFailure(Exception ex, long? failedVersion = null)
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        // If nothing newer has superseded this attempt, keep trying after the force interval
+        // so a transient write failure does not drop the dirty state permanently.
+        ArmSaveRetryIfNeeded(failedVersion);
+
+        if (!_hasShownSaveFailure && !_ignoreSaveFailures)
+        {
+            _hasShownSaveFailure = true;
+            Application.Current.Dispatcher.BeginInvoke(() =>
+            {
+                if (IsExiting)
+                {
+                    return;
+                }
+
+                var dlg = new Window
+                {
+                    Title = Strings.Get("SaveFailureTitle"),
+                    Width = 360,
+                    Height = 180,
+                    WindowStyle = WindowStyle.None,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                    AllowsTransparency = true,
+                    Background = Brushes.Transparent,
+                    Topmost = true
+                };
+                AppTypography.ApplyTextRendering(dlg);
+                var border = new Border
+                {
+                    Background = Theme.PaperBrush,
+                    BorderBrush = Theme.PaperBorderBrush,
+                    BorderThickness = new Thickness(1),
+                    CornerRadius = new CornerRadius(10),
+                    Padding = new Thickness(20)
+                };
+                var grid = new Grid();
+                grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                var txt = new TextBlock
+                {
+                    Text = Strings.Format("SaveFailureMessage", ex.Message),
+                    Foreground = Theme.TextBrush,
+                    TextWrapping = TextWrapping.Wrap,
+                    FontSize = AppTypography.Scale(14)
+                };
+                grid.Children.Add(txt);
+                var btnPanel = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+                Grid.SetRow(btnPanel, 1);
+                var btnOk = new Button { Content = Strings.Get("CommonOk"), Width = 80, Margin = new Thickness(0, 0, 10, 0), Style = BuildDialogButtonStyle() };
+                btnOk.Click += (s, e) =>
+                {
+                    _hasShownSaveFailure = false;
+                    dlg.Close();
+                };
+                var btnIgnore = new Button { Content = Strings.Get("SaveFailureIgnore"), Width = 110, Style = BuildDialogButtonStyle() };
+                btnIgnore.Click += (s, e) => { _ignoreSaveFailures = true; dlg.Close(); };
+                btnPanel.Children.Add(btnOk);
+                btnPanel.Children.Add(btnIgnore);
+                grid.Children.Add(btnPanel);
+                border.Child = grid;
+                dlg.Content = border;
+                dlg.ShowDialog();
+            });
+        }
+    }
+
+    private void ArmSaveRetryIfNeeded(long? failedVersion)
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        if (failedVersion is long version &&
+            version != Interlocked.Read(ref _saveVersion))
+        {
+            return;
+        }
+
+        if (!_hasPendingDirty)
+        {
+            _hasPendingDirty = true;
+            _forceSaveTimer.Stop();
+            _forceSaveTimer.Start();
+            return;
+        }
+
+        if (!_forceSaveTimer.IsEnabled)
+        {
+            _forceSaveTimer.Start();
+        }
+    }
+
+    private static void ShowPaperLimitDialog()
+    {
+        var dialog = new Window
+        {
+            Title = Strings.Get("PaperLimitTitle"),
+            Width = 340,
+            Height = 176,
+            MinWidth = 340,
+            MinHeight = 176,
+            WindowStartupLocation = WindowStartupLocation.CenterScreen,
+            WindowStyle = WindowStyle.None,
+            ResizeMode = ResizeMode.NoResize,
+            AllowsTransparency = true,
+            Background = Brushes.Transparent,
+            ShowInTaskbar = false,
+            Topmost = true
+        };
+        AppTypography.ApplyTextRendering(dialog);
+
+        var root = new Border
+        {
+            Background = Theme.PaperBrush,
+            BorderBrush = Theme.PaperBorderBrush,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(18),
+            Effect = new DropShadowEffect
+            {
+                BlurRadius = 18,
+                ShadowDepth = 2,
+                Opacity = 0.22
+            }
+        };
+
+        var layout = new Grid();
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+        var title = new TextBlock
+        {
+            Text = Strings.Get("PaperLimitTitle"),
+            Foreground = Theme.TextBrush,
+            FontSize = AppTypography.Scale(16),
+            FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+
+        var message = new TextBlock
+        {
+            Text = Strings.Get("PaperLimitMessage"),
+            Foreground = Theme.WeakTextBrush,
+            FontSize = AppTypography.Scale(13),
+            TextWrapping = TextWrapping.Wrap,
+            LineHeight = 20,
+            Margin = new Thickness(0, 2, 0, 0)
+        };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 16, 0, 0)
+        };
+
+        var ok = new Button
+        {
+            Content = Strings.Get("CommonOk"),
+            MinWidth = 72,
+            Style = BuildDialogButtonStyle()
+        };
+        ok.Click += (_, _) => dialog.Close();
+        buttons.Children.Add(ok);
+
+        Grid.SetRow(title, 0);
+        Grid.SetRow(message, 1);
+        Grid.SetRow(buttons, 2);
+
+        layout.Children.Add(title);
+        layout.Children.Add(message);
+        layout.Children.Add(buttons);
+
+        root.Child = layout;
+        dialog.Content = root;
+        dialog.ShowDialog();
+    }
+
+    private bool IsPaperShown(PaperData paper)
+    {
+        return paper.IsVisible && _windows.TryGetValue(paper.Id, out var window) && window.HasVisibleSurface;
+    }
+
+    private bool EnsurePapersOnScreen()
+    {
+        var changed = false;
+        for (var i = 0; i < State.Papers.Count; i++)
+        {
+            if (!_startupDisplayDeferredPapers.Contains(State.Papers[i]))
+                changed |= RescuePaperIfOffScreen(State.Papers[i], i);
+        }
+
+        return changed;
+    }
+
+    private static bool RescuePaperIfOffScreen(PaperData paper, int offsetIndex)
+    {
+        var area = WorkAreaForPaper(paper);
+        var persistedSnapTile = LooksLikePersistedSnapTileGeometry(paper, area);
+        var originalWidth = paper.Width;
+        var originalHeight = paper.Height;
+        paper.Width = ClampPaperDimension(
+            paper.Width,
+            paper.Type == PaperTypes.Note ? PaperLayoutDefaults.NoteDefaultWidth : PaperLayoutDefaults.TodoDefaultWidth,
+            PaperLayoutDefaults.MinWidth,
+            Math.Max(PaperLayoutDefaults.MinWidth, area.Width - 80));
+        paper.Height = ClampPaperDimension(
+            paper.Height,
+            paper.Type == PaperTypes.Note ? PaperLayoutDefaults.NoteDefaultHeight : PaperLayoutDefaults.TodoDefaultHeight,
+            PaperLayoutDefaults.MinHeight,
+            Math.Max(PaperLayoutDefaults.MinHeight, area.Height - 80));
+        var resized = DimensionChanged(originalWidth, paper.Width) ||
+            DimensionChanged(originalHeight, paper.Height);
+
+        if (persistedSnapTile)
+        {
+            PlacePaperInWorkArea(paper, area, offsetIndex);
+            return true;
+        }
+
+        var clamped = ClampPaperToWorkArea(paper, area);
+
+        if (IsPaperUsablyInsideWorkArea(paper, area))
+        {
+            return resized || clamped;
+        }
+
+        PlacePaperInWorkArea(paper, area, offsetIndex);
+        return true;
+    }
+
+    private static double ClampPaperDimension(double value, double fallback, double min, double max)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value) || value <= 0)
+        {
+            value = fallback;
+        }
+
+        return Math.Clamp(value, min, max);
+    }
+
+    private static bool DimensionChanged(double oldValue, double newValue)
+    {
+        if (double.IsNaN(oldValue) || double.IsInfinity(oldValue))
+        {
+            return true;
+        }
+
+        return Math.Abs(newValue - oldValue) > 0.001;
+    }
+
+    private static bool ClampPaperToWorkArea(PaperData paper, Rect area)
+    {
+        if (!IsFinite(paper.X) || !IsFinite(paper.Y) || area.Width <= 0 || area.Height <= 0)
+        {
+            return false;
+        }
+
+        const double margin = 8;
+        var minX = area.Left + margin;
+        var maxX = Math.Max(minX, area.Right - paper.Width - margin);
+        var minY = area.Top + margin;
+        var maxY = Math.Max(minY, area.Bottom - paper.Height - margin);
+
+        var newX = Math.Clamp(paper.X, minX, maxX);
+        var newY = Math.Clamp(paper.Y, minY, maxY);
+        var changed = Math.Abs(newX - paper.X) > 0.001 || Math.Abs(newY - paper.Y) > 0.001;
+
+        paper.X = newX;
+        paper.Y = newY;
+        return changed;
+    }
+
+    private static bool IsPaperUsablyInsideWorkArea(PaperData paper, Rect area)
+    {
+        if (!IsFinite(paper.X) || !IsFinite(paper.Y) || !IsFinite(paper.Width) || !IsFinite(paper.Height))
+        {
+            return false;
+        }
+
+        var paperRect = new Rect(
+            paper.X,
+            paper.Y,
+            Math.Max(paper.Width, 80),
+            Math.Max(paper.Height, 80));
+
+        return area.Contains(paperRect.TopLeft) &&
+               paperRect.Right <= area.Right + 0.001 &&
+               paperRect.Bottom <= area.Bottom + 0.001;
+    }
+
+    private static void PlacePaperInWorkArea(PaperData paper, Rect area, int offsetIndex)
+    {
+        const double margin = 40;
+        var offset = Math.Min(Math.Max(offsetIndex, 0), 8) * 22;
+
+        var minX = area.Left + margin;
+        var maxX = Math.Max(minX, area.Right - paper.Width - margin);
+        var minY = area.Top + margin;
+        var maxY = Math.Max(minY, area.Bottom - paper.Height - margin);
+
+        paper.X = Math.Round(Math.Clamp(area.Left + margin + offset, minX, maxX));
+        paper.Y = Math.Round(Math.Clamp(area.Top + margin + offset, minY, maxY));
+    }
+
+    // Center a paper on the current mouse pointer (global screen DIP), clamped into that
+    // monitor's work area. Used by shortcut/tray create and optional edge-queue open-at-cursor.
+    public bool TryCreateCursorPaperPlacement(double width, double height, out double left, out double top)
+    {
+        left = 0;
+        top = 0;
+        if (!WindowNative.TryGetCursorScreenPosition(out var cursorDevice) ||
+            WindowWorkAreaHelper.MonitorAtDeviceScreenPoint(cursorDevice) is not { } monitor)
+        {
+            return false;
+        }
+
+        var dip = WindowWorkAreaHelper.DeviceScreenPointToDip(cursorDevice);
+        const double margin = 8;
+        var area = monitor.WorkArea;
+        if (area.Width <= 0 || area.Height <= 0)
+        {
+            return false;
+        }
+
+        var w = Math.Max(width, PaperLayoutDefaults.MinWidth);
+        var h = Math.Max(height, PaperLayoutDefaults.MinHeight);
+        w = Math.Min(w, Math.Max(PaperLayoutDefaults.MinWidth, area.Width - (margin * 2)));
+        h = Math.Min(h, Math.Max(PaperLayoutDefaults.MinHeight, area.Height - (margin * 2)));
+
+        var minX = area.Left + margin;
+        var maxX = Math.Max(minX, area.Right - w - margin);
+        var minY = area.Top + margin;
+        var maxY = Math.Max(minY, area.Bottom - h - margin);
+
+        left = Math.Round(Math.Clamp(dip.X - (w / 2.0), minX, maxX));
+        top = Math.Round(Math.Clamp(dip.Y - (h / 2.0), minY, maxY));
+        return true;
+    }
+
+    private void NudgeNewPaperAwayFromExistingPapers(PaperData paper, Rect area)
+    {
+        const double margin = 40;
+        const double step = 22;
+        var minX = area.Left + margin;
+        var maxX = Math.Max(minX, area.Right - paper.Width - margin);
+        var minY = area.Top + margin;
+        var maxY = Math.Max(minY, area.Bottom - paper.Height - margin);
+        ApplyNewPaperCapsuleStripBounds(paper, area, paper.Width, ref minX, ref maxX);
+
+        bool Occupied(double x, double y) =>
+            State.Papers.Any(p => Math.Abs(p.X - x) < 5 && Math.Abs(p.Y - y) < 5);
+
+        var x = paper.X;
+        var y = paper.Y;
+        var wrapped = false;
+        for (var attempts = 0; attempts <= State.Papers.Count && Occupied(x, y); attempts++)
+        {
+            x += step;
+            y += step;
+            if (x > maxX || y > maxY)
+            {
+                if (wrapped)
+                {
+                    break;
+                }
+                wrapped = true;
+                x = minX;
+                y = minY;
+            }
+        }
+
+        paper.X = Math.Round(x);
+        paper.Y = Math.Round(y);
+    }
+
+    private static bool LooksLikePersistedSnapTileGeometry(PaperData paper, Rect area)
+    {
+        if (!IsFinite(paper.X) ||
+            !IsFinite(paper.Y) ||
+            !IsFinite(paper.Width) ||
+            !IsFinite(paper.Height) ||
+            paper.Width <= 0 ||
+            paper.Height <= 0 ||
+            area.Width <= 0 ||
+            area.Height <= 0)
+        {
+            return false;
+        }
+
+        const double tolerance = 1.0;
+        var rect = new Rect(paper.X, paper.Y, paper.Width, paper.Height);
+        bool nearLeft = Math.Abs(rect.Left - area.Left) <= tolerance;
+        bool nearTop = Math.Abs(rect.Top - area.Top) <= tolerance;
+        bool nearRight = Math.Abs(rect.Right - area.Right) <= tolerance;
+        bool nearBottom = Math.Abs(rect.Bottom - area.Bottom) <= tolerance;
+        bool halfWidth = Math.Abs(rect.Width - area.Width / 2) <= tolerance;
+        bool halfHeight = Math.Abs(rect.Height - area.Height / 2) <= tolerance;
+        bool fullWidth = Math.Abs(rect.Width - area.Width) <= tolerance;
+        bool fullHeight = Math.Abs(rect.Height - area.Height) <= tolerance;
+
+        return (fullWidth && fullHeight && nearLeft && nearTop && nearRight && nearBottom) ||
+            (fullHeight && halfWidth && nearTop && nearBottom && (nearLeft || nearRight)) ||
+            (fullWidth && halfHeight && nearLeft && nearRight && (nearTop || nearBottom)) ||
+            (halfWidth && halfHeight && (nearLeft || nearRight) && (nearTop || nearBottom));
+    }
+
+    private static bool IsFinite(double value)
+    {
+        return !double.IsNaN(value) && !double.IsInfinity(value);
+    }
+
+    private static Rect WorkAreaForPaper(PaperData paper)
+    {
+        if (IsFinite(paper.X) &&
+            IsFinite(paper.Y) &&
+            IsFinite(paper.Width) &&
+            IsFinite(paper.Height) &&
+            paper.Width > 0 &&
+            paper.Height > 0)
+        {
+            return WindowWorkAreaHelper.WorkAreaFor(new Rect(paper.X, paper.Y, paper.Width, paper.Height));
+        }
+
+        return SystemParameters.WorkArea;
+    }
+
+    // Per-queue vertical rest position, keyed by (monitor, edge). Falls back to the legacy global
+    // margin when a queue has no stored value, so old configs are unchanged and a queue's first
+    // slide forks it from the global default.
+    public double DeepCapsuleStartTopMarginFor(PaperData paper)
+    {
+        var edge = paper.CapsuleSide == DeepCapsuleSides.Left ? EdgeCapsuleEdge.Left : EdgeCapsuleEdge.Right;
+        return DeepCapsuleStartTopMarginForQueue(paper.CapsuleMonitorDeviceName, edge);
+    }
+
+    public double DeepCapsuleStartTopMarginForQueue(string monitorDeviceName, EdgeCapsuleEdge edge)
+    {
+        var key = QueueKey(monitorDeviceName, edge == EdgeCapsuleEdge.Left ? DeepCapsuleSides.Left : DeepCapsuleSides.Right);
+        return State.DeepCapsuleQueueStartTopMargins.TryGetValue(key, out var m)
+            ? m
+            : EdgeCapsuleLayout.StartTopMargin;
+    }
+
+    // Reset ALL deep-capsule start heights to the default — both the legacy global scalar AND the
+    // per-queue dictionary. Must clear the dict too: layout reads per-queue values first, so
+    // leaving stale entries would resurrect old queue heights when the mode is re-enabled (and
+    // persist them to data.json). Single chokepoint so no reset path forgets the dict again.
+    private void ResetDeepCapsuleStartTopMargins()
+    {
+        State.DeepCapsuleQueueStartTopMargins.Clear();
+    }
+
+    // Live-adjust ONE queue's vertical rest position while its master pill is dragged. Writes the
+    // per-queue margin (keyed by monitor+edge) so other queues are untouched. Relayouts immediately;
+    // persists only on commit (drag release) so mid-drag frames don't thrash the save path.
+    public void SetDeepCapsuleStartTopMargin(string monitorDeviceName, EdgeCapsuleEdge edge, double startTopMargin, bool commit = false)
+    {
+        if (!State.UseCapsuleMode || !State.UseDeepCapsuleMode)
+        {
+            return;
+        }
+
+        var side = edge == EdgeCapsuleEdge.Left ? DeepCapsuleSides.Left : DeepCapsuleSides.Right;
+        var key = QueueKey(monitorDeviceName, side);
+        var area = EdgeCapsuleLayout.LocalWorkAreaForQueue(monitorDeviceName);
+
+        // Slot count for THIS queue (+1 if its master occupies slot 0).
+        var queueCount = DeepCapsulePapersInOrder().Count(p => QueueKey(p) == key);
+        var slotCount = queueCount + (State.UseCapsuleCollapseAll && queueCount > 0 ? 1 : 0);
+        var normalized = EdgeCapsuleLayout.NormalizeStartTopMargin(
+            startTopMargin,
+            area,
+            slotCount,
+            DeepCapsuleGap);
+
+        var current = State.DeepCapsuleQueueStartTopMargins.TryGetValue(key, out var m) ? m : EdgeCapsuleLayout.StartTopMargin;
+        if (Math.Abs(current - normalized) < 0.01)
+        {
+            if (commit)
+            {
+                SaveNow();
+            }
+            return;
+        }
+
+        State.DeepCapsuleQueueStartTopMargins[key] = normalized;
+        ArrangeDeepCapsules(animate: false);
+
+        if (commit)
+        {
+            SaveNow();
+        }
+    }
+
+    public void Exit()
+    {
+        if (IsExiting)
+        {
+            return;
+        }
+
+        CommitSettingsExternalMarkdownEditor(saveImmediately: false);
+        foreach (var window in _windows.Values.ToList())
+        {
+            window.CommitPendingEditsForSave();
+        }
+
+        _lifecycleState = AppLifecycleState.Exiting;
+        _saveTimer.Stop();
+        _forceSaveTimer.Stop();
+        StopFullscreenAvoidanceRuntime(restoreTopmost: false);
+        _displayMetricsRefreshTimer.Stop();
+        StopTodoReminderTimer();
+
+        if (!TrySaveNow(sync: true))
+        {
+            TryExitCleanup(() =>
+            {
+                MessageBox.Show(
+                    Strings.Get("ExitSaveFailureMessage"),
+                    Strings.Get("SaveFailureTitle"),
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            });
+        }
+
+        DisposeRuntimeResources();
+        try { _pluginStartupHealthStore.MarkCleanExit(); } catch { }
+        _lifecycleState = AppLifecycleState.Disposed;
+        // Let the owning Dispatcher finish WPF shutdown and App.OnExit (single-instance
+        // listener, telemetry and Application resources). Environment.Exit here preempts
+        // that queued work and was slower in the process-exit A/B; owned work is already stopped.
+        Application.Current.Shutdown();
+    }
+
+    private static void TryExitCleanup(Action cleanup)
+    {
+        try
+        {
+            cleanup();
+        }
+        catch
+        {
+            // One stale window or child process must not leave the app half-exited.
+        }
+    }
+
+    private void DisposeTrayIcon()
+    {
+        if (_trayMenu != null)
+        {
+            _trayMenu.IsOpen = false;
+        }
+
+        var trayIcon = _trayIcon;
+        _trayIcon = null;
+        _trayMenu = null;
+
+        if (trayIcon == null)
+        {
+            return;
+        }
+
+        try
+        {
+            trayIcon.Visibility = Visibility.Hidden;
+            trayIcon.Dispose();
+        }
+        catch
+        {
+            // Exit cleanup must not be blocked by a stale shell notification icon.
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_lifecycleState == AppLifecycleState.Disposed)
+        {
+            return;
+        }
+
+        if (_lifecycleState == AppLifecycleState.Running)
+        {
+            foreach (var window in _windows.Values.ToList())
+            {
+                window.CommitPendingEditsForSave();
+            }
+
+            TrySaveNow(sync: true);
+        }
+
+        _lifecycleState = AppLifecycleState.Exiting;
+        DisposeRuntimeResources();
+        try { _pluginStartupHealthStore.MarkCleanExit(); } catch { }
+        _lifecycleState = AppLifecycleState.Disposed;
+    }
+
+    private void DisposeRuntimeResources()
+    {
+        StopMaintenanceOperations();
+        CancelStartupDisplayRestore();
+        _pluginStartupPaperGeneration++;
+        StopStateBackupPolicy();
+        MarkdownEdgePreviewPreload.For(Application.Current.Dispatcher).Clear();
+        // Stop all child processes together; their grace periods overlap each other and WPF
+        // teardown. Only non-UI process work runs in the pool, not Window/Host disposal.
+        var scriptShutdown = PaperWindow.StopAllScriptProcessesAsync();
+        _paperSurfaceRestoreGeneration++;
+        _startupShellPrewarmGeneration++;
+        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+        SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
+        SystemEvents.TimeChanged -= OnSystemTimeChanged;
+        _saveTimer.Stop();
+        _forceSaveTimer.Stop();
+        StopFullscreenAvoidanceRuntime(restoreTopmost: false);
+        _displayMetricsRefreshTimer.Stop();
+        StopTodoReminderTimer();
+        TryExitCleanup(DisposeEdgeCapsuleQueueCompositionProxies);
+        // Final editor commit/save precedes this point. Withdraw every visible WPF surface
+        // before slow plugin/child-process teardown, without changing persisted IsVisible.
+        foreach (Window surface in Application.Current.Windows.Cast<Window>().ToArray())
+            TryExitCleanup(() => surface.Hide());
+        ClearPaperLinkDropTarget();
+        _deepCapsuleContextMenuOwners.Clear();
+        _displayMetricsRefreshState = DisplayMetricsRefreshState.Idle;
+        TryExitCleanup(DisposeGlobalHotkeys);
+        TryExitCleanup(DisposeMcpRuntime);
+        TryExitCleanup(DisposeExperimentalWindowRuntime);
+        TryExitCleanup(DisposeTrayIcon);
+        TryExitCleanup(() => _settingsWindow?.Close());
+        _settingsWindow = null;
+        foreach (var window in _windows.Values.ToList())
+        {
+            TryExitCleanup(() => window.CloseForReal());
+        }
+        _windows.Clear();
+        TryExitCleanup(DisposePaperBodyPlugins);
+        foreach (var m in _masterCapsules.Values.ToList())
+        {
+            TryExitCleanup(m.CloseForReal);
+        }
+        _masterCapsules.Clear();
+        TryExitCleanup(_imageStore.Dispose);
+        TryExitCleanup(_updateClient.Dispose);
+        TryExitCleanup(() => scriptShutdown.GetAwaiter().GetResult());
+    }
+}

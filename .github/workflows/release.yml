@@ -1,0 +1,368 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create or update. Defaults to v<project version>."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease."
+        required: false
+        default: false
+        type: boolean
+      stable_release_confirmed:
+        description: "Required for stable releases. Confirms final hand checks are complete."
+        required: false
+        default: false
+        type: boolean
+      retarget_existing_tag:
+        description: "Allow an existing release tag to move to this commit before replacing assets."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build Windows executables
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "true"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          # wpf-notifyicon uses Nerdbank.GitVersioning, which needs history far enough
+          # to calculate version height. A depth-1 parent checkout also shallow-clones
+          # submodules and makes release publishing fail with a missing commit object.
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build native LMDB library
+        run: .\native\lmdb\build.ps1 -Configuration Release -ForceRebuild
+
+      - name: Read project metadata
+        id: meta
+        env:
+          PUBLISHER_SUBJECT: ${{ vars.PAPERNOOK_PUBLISHER_SUBJECT }}
+          PUBLISHER_SPKI_SHA256: ${{ vars.PAPERNOOK_PUBLISHER_SPKI_SHA256 }}
+        run: |
+          $project = [xml](Get-Content -LiteralPath .\PaperTodo.csproj -Raw)
+          # Multiple PropertyGroups exist; .PropertyGroup.Version is an array that stringifies
+          # with a trailing space (e.g. "3.0 "). Read the single Version element instead.
+          $versionNodes = $project.SelectNodes('/Project/PropertyGroup/Version')
+          if ($versionNodes.Count -ne 1) {
+            throw "PaperTodo.csproj must define exactly one <Version> element (found $($versionNodes.Count))."
+          }
+          $version = ([string]$versionNodes[0].InnerText).Trim()
+          if ([string]::IsNullOrWhiteSpace($version) -or $version -match '\s') {
+            throw "PaperTodo.csproj <Version> is missing or contains whitespace: '$version'."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:PUBLISHER_SUBJECT)) {
+            throw "PAPERNOOK_PUBLISHER_SUBJECT must be configured before release."
+          }
+          $pins = $env:PUBLISHER_SPKI_SHA256 -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+          if ($pins.Count -eq 0 -or ($pins | Where-Object { $_ -notmatch '^[0-9a-fA-F]{64}$' })) {
+            throw "PAPERNOOK_PUBLISHER_SPKI_SHA256 must contain one or more 64-character SHA-256 pins."
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "self_contained_exe=PaperNook-v$version-win-x64-self-contained.exe" >> $env:GITHUB_OUTPUT
+          "framework_dependent_exe=PaperNook-v$version-win-x64-no-runtime.exe" >> $env:GITHUB_OUTPUT
+          "portable_zip=PaperNook-v$version-win-x64-portable.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Restore
+        run: dotnet restore .\PaperTodo.csproj
+
+      - name: Run crash recovery matrix
+        run: dotnet run --project .\tests\PaperTodo.CrashRecoveryChecks\PaperTodo.CrashRecoveryChecks.csproj -c Release
+
+      - name: Publish release executables
+        env:
+          SELF_CONTAINED_EXE: ${{ steps.meta.outputs.self_contained_exe }}
+          FRAMEWORK_DEPENDENT_EXE: ${{ steps.meta.outputs.framework_dependent_exe }}
+        run: |
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release"
+          $selfContainedOut = Join-Path $env:RUNNER_TEMP "publish-self-contained"
+          $frameworkDependentOut = Join-Path $env:RUNNER_TEMP "publish-no-runtime"
+
+          Remove-Item -LiteralPath $releaseDir, $selfContainedOut, $frameworkDependentOut -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $releaseDir, $selfContainedOut, $frameworkDependentOut | Out-Null
+
+          dotnet publish .\PaperTodo.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -o $selfContainedOut `
+            /p:PublishSingleFile=true `
+            /p:PublishReadyToRun=false `
+            /p:IncludeNativeLibrariesForSelfExtract=true `
+            /p:EnableCompressionInSingleFile=true `
+            /p:PublishTrimmed=false `
+            /p:EmbedAllSources=false `
+            /p:EmbedUntrackedSources=false `
+            /p:DebugType=none `
+            /p:DebugSymbols=false `
+            /p:PaperNookDistribution=self-contained `
+            /p:PaperNookPublisherSubject="${{ vars.PAPERNOOK_PUBLISHER_SUBJECT }}" `
+            /p:PaperNookPublisherSpkiSha256="${{ vars.PAPERNOOK_PUBLISHER_SPKI_SHA256 }}"
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          Copy-Item -LiteralPath (Join-Path $selfContainedOut "PaperNook.exe") -Destination (Join-Path $releaseDir $env:SELF_CONTAINED_EXE)
+
+          dotnet publish .\PaperTodo.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained false `
+            -o $frameworkDependentOut `
+            /p:PublishSingleFile=true `
+            /p:PublishReadyToRun=false `
+            /p:IncludeNativeLibrariesForSelfExtract=true `
+            /p:EnableCompressionInSingleFile=false `
+            /p:PublishTrimmed=false `
+            /p:EmbedAllSources=false `
+            /p:EmbedUntrackedSources=false `
+            /p:DebugType=none `
+            /p:DebugSymbols=false `
+            /p:PaperNookDistribution=no-runtime `
+            /p:PaperNookPublisherSubject="${{ vars.PAPERNOOK_PUBLISHER_SUBJECT }}" `
+            /p:PaperNookPublisherSpkiSha256="${{ vars.PAPERNOOK_PUBLISHER_SPKI_SHA256 }}"
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          Copy-Item -LiteralPath (Join-Path $frameworkDependentOut "PaperNook.exe") -Destination (Join-Path $releaseDir $env:FRAMEWORK_DEPENDENT_EXE)
+
+      - name: Sign in to Azure with OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign release executables with Artifact Signing
+        uses: azure/artifact-signing-action@v2.0.0
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+          files-folder: ${{ github.workspace }}\release
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: https://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify signed executables
+        run: |
+          $signTool = (Get-Command signtool.exe -ErrorAction Stop).Source
+          Get-ChildItem -LiteralPath .\release -Filter *.exe | ForEach-Object {
+            & $signTool verify /pa /all /v $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Build portable package and release manifest
+        env:
+          PORTABLE_ZIP: ${{ steps.meta.outputs.portable_zip }}
+        run: |
+          if ("${{ github.event_name }}" -eq "push") {
+            $manifestTag = "${{ github.ref_name }}"
+          } else {
+            $manifestTag = "${{ inputs.release_tag }}"
+            if ([string]::IsNullOrWhiteSpace($manifestTag)) {
+              $manifestTag = "v${{ steps.meta.outputs.version }}"
+            }
+          }
+          $portableDir = Join-Path $env:RUNNER_TEMP "portable"
+          Remove-Item -LiteralPath $portableDir -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $portableDir | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "release\${{ steps.meta.outputs.self_contained_exe }}") -Destination (Join-Path $portableDir "PaperNook.exe")
+          New-Item -ItemType File -Path (Join-Path $portableDir "papernook.portable") | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "LICENSE.md") -Destination (Join-Path $portableDir "LICENSE.md")
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "README.zh.md") -Destination (Join-Path $portableDir "README.zh.md")
+          Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath (Join-Path $env:GITHUB_WORKSPACE "release\$env:PORTABLE_ZIP") -CompressionLevel Optimal
+
+          .\.github\scripts\write_release_manifest.ps1 `
+            -ReleaseDirectory .\release `
+            -Repository $env:GITHUB_REPOSITORY `
+            -Tag $manifestTag `
+            -Version "${{ steps.meta.outputs.version }}"
+
+          .\.github\scripts\verify_signed_release.ps1 `
+            -ReleaseDirectory .\release `
+            -PublisherSubject "${{ vars.PAPERNOOK_PUBLISHER_SUBJECT }}"
+
+      - name: Upload executable package
+        uses: actions/upload-artifact@v7
+        with:
+          name: PaperNook-v${{ steps.meta.outputs.version }}-win-x64
+          if-no-files-found: error
+          path: |
+            release/${{ steps.meta.outputs.self_contained_exe }}
+            release/${{ steps.meta.outputs.framework_dependent_exe }}
+            release/${{ steps.meta.outputs.portable_zip }}
+            release/release-manifest.json
+
+      - name: Resolve release tag
+        id: release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        run: |
+          if ("${{ github.event_name }}" -eq "push") {
+            $tag = "${{ github.ref_name }}"
+          } else {
+            $tag = "${{ inputs.release_tag }}"
+            if ([string]::IsNullOrWhiteSpace($tag)) {
+              $tag = "v${{ steps.meta.outputs.version }}"
+            }
+          }
+
+          if (-not $tag.StartsWith("v")) {
+            throw "Release tag must start with 'v'. Got '$tag'."
+          }
+
+          $isStable = $tag -notmatch '(?i)(alpha|beta|preview|rc)'
+          $expectedTag = "v${{ steps.meta.outputs.version }}"
+          if ($isStable -and $tag -ne $expectedTag) {
+            throw "Stable release tag '$tag' does not match the checked-out project version. Expected '$expectedTag'."
+          }
+
+          $stableConfirmed = "${{ inputs.stable_release_confirmed }}" -eq "true"
+          if ($isStable -and "${{ github.event_name }}" -ne "workflow_dispatch") {
+            throw "Stable releases must be published from workflow_dispatch after final hand checks. Prerelease tags may still publish from tag pushes."
+          }
+          if ($isStable -and -not $stableConfirmed) {
+            throw "Stable release '$tag' requires stable_release_confirmed=true."
+          }
+
+          $retargetRequested = "${{ inputs.retarget_existing_tag }}" -eq "true"
+          if ($retargetRequested -and "${{ github.event_name }}" -ne "workflow_dispatch") {
+            throw "retarget_existing_tag can only be used with workflow_dispatch."
+          }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Python for release notes
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Write release notes
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SELF_CONTAINED_EXE: ${{ steps.meta.outputs.self_contained_exe }}
+          FRAMEWORK_DEPENDENT_EXE: ${{ steps.meta.outputs.framework_dependent_exe }}
+          PORTABLE_ZIP: ${{ steps.meta.outputs.portable_zip }}
+        run: |
+          python .github/scripts/release_notes.py `
+            --tag $env:RELEASE_TAG `
+            --repository $env:GITHUB_REPOSITORY `
+            --assets $env:SELF_CONTAINED_EXE $env:FRAMEWORK_DEPENDENT_EXE $env:PORTABLE_ZIP release-manifest.json `
+            --output release/RELEASE_NOTES.md
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "release"
+          $tag = "${{ steps.release.outputs.tag }}"
+          $retargetRequested = "${{ inputs.retarget_existing_tag }}" -eq "true"
+
+          # Existing release tags are immutable by default. Repointing one requires an explicit
+          # workflow_dispatch opt-in so an accidental rebuild cannot silently rewrite a release.
+          git fetch --force --tags origin
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git show-ref --verify --quiet "refs/tags/$tag"
+          if ($LASTEXITCODE -eq 0) {
+            $tagCommit = (git rev-list -n 1 $tag).Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tagCommit)) {
+              throw "Could not resolve existing release tag $tag."
+            }
+            if ($tagCommit -ne $env:GITHUB_SHA) {
+              if (-not $retargetRequested) {
+                throw "Release tag $tag already points to $tagCommit, not $env:GITHUB_SHA. Re-run manually with retarget_existing_tag=true only if replacing that published version is intentional."
+              }
+
+              Write-Host "Retargeting existing release tag $tag from $tagCommit to $env:GITHUB_SHA"
+              git tag -f $tag $env:GITHUB_SHA
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              git push origin "refs/tags/$tag" --force
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+
+          $selfContained = "${{ steps.meta.outputs.self_contained_exe }}"
+          $frameworkDependent = "${{ steps.meta.outputs.framework_dependent_exe }}"
+          $portableZip = "${{ steps.meta.outputs.portable_zip }}"
+          $assets = @(
+            (Join-Path $releaseDir $selfContained),
+            (Join-Path $releaseDir $frameworkDependent),
+            (Join-Path $releaseDir $portableZip),
+            (Join-Path $releaseDir "release-manifest.json")
+          )
+          $notes = Join-Path $releaseDir "RELEASE_NOTES.md"
+          $isPrerelease = ("${{ inputs.prerelease }}" -eq "true") -or ($tag -match '(?i)(alpha|beta|preview|rc)')
+          $expectedAssetNames = @(
+            $selfContained,
+            $frameworkDependent,
+            $portableZip,
+            "release-manifest.json"
+          )
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $existingAssetNames = @(gh release view $tag --json assets --jq '.assets[].name')
+            foreach ($assetName in $existingAssetNames) {
+              if ($expectedAssetNames -notcontains $assetName) {
+                gh release delete-asset $tag $assetName --yes
+              }
+            }
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit $tag --target $env:GITHUB_SHA --title "PaperNook $tag" --notes-file $notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            if ($isPrerelease) {
+              gh release edit $tag --prerelease
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          } else {
+            $createArgs = @(
+              "release", "create", $tag
+            ) + $assets + @(
+              "--target", $env:GITHUB_SHA,
+              "--title", "PaperNook $tag",
+              "--notes-file", $notes
+            )
+
+            if ($isPrerelease) {
+              $createArgs += "--prerelease"
+            }
+
+            gh @createArgs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

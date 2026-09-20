@@ -1,0 +1,1701 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using Microsoft.Win32;
+using PaperTodo.Plugin;
+
+namespace PaperTodo;
+
+public sealed partial class PaperWindow
+{
+    internal const int NoteTextMaxLength = 100000;
+    private static readonly object PersistentScriptProcessLock = new();
+    private static readonly Dictionary<string, Process> PersistentScriptProcesses = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object ActiveScriptProcessLock = new();
+    private static readonly Dictionary<Guid, Process> ActiveScriptProcesses = new();
+
+    internal void RefreshNoteForExternalChange()
+    {
+        if (_paper.Type == PaperTypes.Note)
+        {
+            RefreshCurrentPaperBodyFromModel();
+        }
+    }
+
+    private int BeginNotePresenterSession()
+    {
+        CancelNotePresenterDeferredWork();
+        _cancelNotePresenterInteractions = null;
+        _showNotePreview = null;
+        _notePreviewContextMenu = null;
+        return ++_notePresenterGeneration;
+    }
+
+    private bool IsCurrentNotePresenter(int presenterGeneration, MarkdownTextBox box)
+    {
+        return presenterGeneration == _notePresenterGeneration &&
+            ReferenceEquals(_noteBox, box) &&
+            _windowLifecycle == PaperWindowLifecycleState.Alive &&
+            !IsClosed;
+    }
+
+    private bool IsCurrentNoteDeferredWork(
+        int presenterGeneration,
+        int deferredWorkGeneration,
+        MarkdownTextBox box)
+    {
+        return deferredWorkGeneration == _noteDeferredWorkGeneration &&
+            IsCurrentNotePresenter(presenterGeneration, box);
+    }
+
+    // Window lifecycle code calls this before hiding/closing so queued focus/image work from
+    // the old interaction cannot run against a later presenter generation.
+    private void CancelNotePresenterDeferredWork()
+    {
+        _markdownBodySession?.CancelPresenterDeferredWork();
+    }
+
+    public void UpdateMarkdownRenderMode()
+    {
+        if (_paper.Type == PaperTypes.Note && _noteBox != null)
+        {
+            var mode = _controller.State.MarkdownRenderMode;
+            TraceNoteRender($"UpdateMarkdownRenderMode mode={mode}");
+            _noteBox.SetMarkdownRenderMode(mode);
+        }
+        InvalidateEdgeCapsulePreviewContent();
+    }
+
+    public void UpdateImageReferenceTextMode()
+    {
+        if (_paper.Type == PaperTypes.Note && _noteBox != null)
+        {
+            _noteBox.SetImageReferenceTextMode(_controller.State.ImageReferenceTextMode);
+        }
+    }
+
+    public void UpdateMarkdownEditAnimation()
+    {
+        if (_paper.Type == PaperTypes.Note && _noteBox != null)
+        {
+            _noteBox.SetMarkdownEditAnimationEnabled(
+                _controller.State.MarkdownEditAnimationEnabled);
+        }
+    }
+
+    private void TraceNoteRender(string message)
+    {
+#if DEBUG
+        if (EdgeDiagnosticJournal.Enabled)
+        {
+            EdgeDiagnosticJournal.AppendText("md-render-trace.log", $"paper={_paper.Id[..Math.Min(6, _paper.Id.Length)]} {message}");
+            return;
+        }
+        // edgeJournal: default non-memory diagnostics preserve their original behavior.
+#endif
+
+#if DEBUG
+        try
+        {
+            var path = System.IO.Path.Combine(AppContext.BaseDirectory, "md-render-trace.log");
+            var line = $"{DateTime.Now:HH:mm:ss.fff} paper={_paper.Id[..Math.Min(6, _paper.Id.Length)]} {message}{Environment.NewLine}";
+            lock (NoteRenderTraceLock)
+            {
+                System.IO.File.AppendAllText(path, line);
+            }
+        }
+        catch
+        {
+            // Test-only diagnostics must never affect note interaction.
+        }
+#endif
+    }
+
+    private void ExitNoteEditor()
+    {
+        if (_paper.Type != PaperTypes.Note || _noteBox == null)
+        {
+            return;
+        }
+
+        if (_noteBox.ContextMenu?.IsOpen == true)
+        {
+            return;
+        }
+
+        Keyboard.ClearFocus();
+        _showNotePreview?.Invoke();
+    }
+
+
+    private UIElement BuildNoteBody()
+    {
+        var presenterGeneration = BeginNotePresenterSession();
+        var host = new Grid();
+
+        _noteBox = new MarkdownTextBox
+        {
+            MaxLength = NoteTextMaxLength,
+            Text = _paper.Content ?? "",
+            AcceptsReturn = true,
+            AcceptsTab = true,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            Foreground = TextBrush,
+            CaretBrush = TextBrush,
+            FontFamily = NoteTypography.FontFamily,
+            FontSize = NoteTypography.FontSize,
+            FontStyle = NoteTypography.FontStyle,
+            FontWeight = NoteTypography.FontWeight,
+            FontStretch = NoteTypography.FontStretch,
+            Language = NoteTypography.Language,
+            Margin = NoteTypography.ContentPadding,
+            FocusVisualStyle = null
+        };
+        var box = _noteBox;
+        box.ImageContextMenuFactory = CreateContextMenu;
+        box.SetMarkdownRenderMode(_controller.State.MarkdownRenderMode);
+        box.SetImageReferenceTextMode(_controller.State.ImageReferenceTextMode);
+        box.SetMarkdownEditAnimationEnabled(_controller.State.MarkdownEditAnimationEnabled);
+        box.SetTextZoom(CurrentTextZoom());
+        box.ConfigureNoteImages(_paper.Id, _controller.ImageStore);
+        _noteContentDirty = box.Document.TextLength != (_paper.Content?.Length ?? 0);
+        _liveIsScriptCapsule = IsScriptCapsuleDocument(box);
+        box.ImageImportFailed += ShowNoteImageImportFailure;
+        box.PasteRejected += ShowNotePasteRejected;
+        // New MarkdownTextBox defaults to rendering images; re-apply hide/collapse/minimize policy.
+        SyncNoteImagePresentationState();
+
+        host.Children.Add(box);
+        var isPreviewing = false;
+        var isEnteringEditorFromPreview = false;
+        var isInteractingWithImage = false;
+        var isOpeningImagePicker = false;
+        int? pendingImageReferenceOffset = null;
+        string? pendingImageId = null;
+        var editorEntryGeneration = 0;
+        var imageInteractionGeneration = 0;
+        int previewSelectionStart = 0;
+        int previewSelectionLength = 0;
+        int previewSelectionSnapshotLength = -1; // -1 表示无有效快照
+
+        bool IsCurrentPresenter()
+        {
+            return IsCurrentNotePresenter(presenterGeneration, box);
+        }
+
+        _cancelNotePresenterInteractions = () =>
+        {
+            if (!IsCurrentPresenter())
+            {
+                return;
+            }
+
+            editorEntryGeneration++;
+            imageInteractionGeneration++;
+            isEnteringEditorFromPreview = false;
+            isInteractingWithImage = false;
+            pendingImageReferenceOffset = null;
+            pendingImageId = null;
+        };
+
+        var editorMenu = CreateContextMenu();
+        editorMenu.Items.Add(MenuHeader(Strings.Get("MenuFormat")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuBold"), (_, _) => box.WrapSelection("**", "**")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuItalic"), (_, _) => box.WrapSelection("*", "*")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuStrikethrough"), (_, _) => box.WrapSelection("~~", "~~")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuHeading"), (_, _) => box.InsertLinePrefix("# ")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuQuote"), (_, _) => box.InsertLinePrefix("> ")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuList"), (_, _) => box.InsertLinePrefix("- ")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuCodeBlock"), (_, _) => box.WrapSelection("```\n", "\n```")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuInsertLink"), (_, _) => box.InsertMarkdownLink()));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuInsertImage"), (_, _) =>
+        {
+            isOpeningImagePicker = true;
+            try
+            {
+                ShowEditor(focus: false);
+                var imagePaths = SelectImagesFromFilePicker();
+                if (imagePaths.Length == 0 || !IsCurrentPresenter())
+                {
+                    return;
+                }
+
+                // The modal picker can run deactivation/focus callbacks before returning.
+                // Reassert edit mode only after confirming this presenter is still current.
+                ShowEditor(focus: false);
+                InsertImageFiles(box, imagePaths);
+            }
+            finally
+            {
+                isOpeningImagePicker = false;
+                ShowEditor();
+            }
+        }));
+        editorMenu.Items.Add(MenuSeparator());
+        editorMenu.Items.Add(MenuHeader(Strings.Get("MenuText")));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuCopy"), (_, _) => box.Copy()));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuPaste"), (_, _) => box.Paste()));
+        editorMenu.Items.Add(MenuItem(Strings.Get("MenuSelectAll"), (_, _) => box.SelectAll()));
+
+        _notePreviewContextMenu = BuildPaperContextMenu();
+        void ShowPreview()
+        {
+            if (!IsCurrentPresenter())
+            {
+                return;
+            }
+
+            var alreadyPreviewing = isPreviewing && box.IsPreviewMode;
+            TraceNoteRender($"ShowPreview before isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode} already={alreadyPreviewing}");
+            if (!alreadyPreviewing)
+            {
+                // 离开编辑态进预览前快照文本选区:预览态仍塌陷以保持视觉干净(不高亮),
+                // 点回正文且落点在快照范围内时恢复选区,避免“选中→失焦→点回”后选区被清空。
+                previewSelectionStart = box.SelectionStart;
+                previewSelectionLength = box.SelectionLength;
+                previewSelectionSnapshotLength = box.Text.Length;
+            }
+            box.ClearImageSelection();
+            box.SelectionLength = 0;
+
+            if (!alreadyPreviewing)
+            {
+                box.SetPreviewMode(true);
+                box.ContextMenu = _notePreviewContextMenu ??= BuildPaperContextMenu();
+                isPreviewing = true;
+                // Focus can be cleared by the caller before preview mode is entered. Defer the
+                // decision until WPF has finished the current focus transition, then park focus
+                // on the active window only when no child control has claimed it. The standalone
+                // find Popup does not contribute to the owner's IsKeyboardFocusWithin, so check
+                // it separately to keep the window-level ESC fallback from stealing search input.
+                var deferredWorkGeneration = _noteDeferredWorkGeneration;
+                Dispatcher.BeginInvoke(
+                    (Action)(() =>
+                    {
+                        if (!IsCurrentNoteDeferredWork(
+                                presenterGeneration,
+                                deferredWorkGeneration,
+                                box))
+                        {
+                            return;
+                        }
+
+                        if (isPreviewing &&
+                            IsActive &&
+                            !IsKeyboardFocusWithin &&
+                            _findHost?.IsKeyboardFocusWithin != true &&
+                            !IsPaperContextMenuInteractionActive)
+                        {
+                            Focus();
+                        }
+                    }),
+                    System.Windows.Threading.DispatcherPriority.Input);
+            }
+            TraceNoteRender($"ShowPreview after isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode} already={alreadyPreviewing}");
+        }
+
+        _showNotePreview = ShowPreview;
+
+        void ShowEditor(bool focus = true)
+        {
+            if (!IsCurrentPresenter())
+            {
+                return;
+            }
+
+            TraceNoteRender($"ShowEditor before focus={focus} isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode}");
+
+            box.SetPreviewMode(false);
+            box.ContextMenu = editorMenu;
+            isPreviewing = false;
+
+            if (focus && !box.IsKeyboardFocusWithin)
+            {
+                box.Focus();
+            }
+            TraceNoteRender($"ShowEditor after focus={focus} isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode} focused={box.IsKeyboardFocusWithin}");
+        }
+
+        void ShowEditorAtPreviewPoint(
+            Point previewPoint,
+            DependencyObject? originalSource = null,
+            bool selectImage = true,
+            bool fromMouseClick = true)
+        {
+            if (!IsCurrentPresenter())
+            {
+                return;
+            }
+
+            var entryGeneration = ++editorEntryGeneration;
+            TraceNoteRender($"ShowEditorAtPreviewPoint x={previewPoint.X:F1} y={previewPoint.Y:F1}");
+            var hasImageSelection = false;
+            var imageReferenceOffset = 0;
+            var imageId = "";
+            var hasImageCaret = false;
+            var caretIndex = 0;
+            if (selectImage)
+            {
+                hasImageSelection = box.TryGetImageReferenceFromSource(
+                    originalSource,
+                    out imageReferenceOffset,
+                    out imageId);
+                if (!hasImageSelection)
+                {
+                    hasImageSelection = box.TryGetImageReferenceFromPoint(
+                        previewPoint,
+                        out imageReferenceOffset,
+                        out imageId);
+                }
+            }
+            else
+            {
+                hasImageCaret = box.TryGetImageCaretFromSource(originalSource, out caretIndex);
+                if (!hasImageCaret)
+                {
+                    hasImageCaret = box.TryGetImageCaretFromPoint(previewPoint, out caretIndex);
+                }
+            }
+            var hasPreviewPosition = hasImageSelection || hasImageCaret;
+            if (!hasPreviewPosition)
+            {
+                hasPreviewPosition = box.TryGetCharacterIndexFromPoint(previewPoint, out caretIndex);
+            }
+
+            isEnteringEditorFromPreview = true;
+            ShowEditor(focus: false);
+
+            if (!box.IsKeyboardFocusWithin)
+            {
+                box.Focus();
+            }
+
+            if (hasImageSelection)
+            {
+                MarkImageInteraction();
+                pendingImageReferenceOffset = imageReferenceOffset;
+                pendingImageId = imageId;
+                box.SelectImageReference(imageReferenceOffset, imageId);
+            }
+            else if (hasImageCaret)
+            {
+                box.ClearImageSelection();
+                box.PlaceCaretAfterImage(caretIndex);
+            }
+            else if (hasPreviewPosition)
+            {
+                box.ClearImageSelection();
+                var targetOffset = Math.Clamp(caretIndex, 0, box.Text.Length);
+                var snapshotEnd = previewSelectionStart + previewSelectionLength;
+                var clickInSnapshotSelection =
+                    fromMouseClick &&
+                    previewSelectionLength > 0 &&
+                    previewSelectionSnapshotLength == box.Text.Length &&
+                    snapshotEnd <= box.Text.Length &&
+                    targetOffset >= previewSelectionStart &&
+                    targetOffset <= snapshotEnd;
+                if (clickInSnapshotSelection)
+                {
+                    // 点回正文且落点在上次选区内:恢复整段选区(caret 落选区末端),不再塌陷。
+                    box.Select(previewSelectionStart, previewSelectionLength);
+                }
+                else
+                {
+                    box.CaretIndex = targetOffset;
+                    box.SelectionLength = 0;
+                }
+            }
+            TraceNoteRender($"ShowEditorAtPreviewPoint after hasPosition={hasPreviewPosition} caret={box.CaretIndex}");
+            var deferredWorkGeneration = _noteDeferredWorkGeneration;
+            Dispatcher.BeginInvoke(
+                (Action)(() =>
+                {
+                    if (!IsCurrentNoteDeferredWork(
+                            presenterGeneration,
+                            deferredWorkGeneration,
+                            box) ||
+                        entryGeneration != editorEntryGeneration)
+                    {
+                        return;
+                    }
+
+                    isEnteringEditorFromPreview = false;
+                    TraceNoteRender($"ShowEditorAtPreviewPoint release focused={box.IsKeyboardFocusWithin} isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode}");
+                }),
+                System.Windows.Threading.DispatcherPriority.ContextIdle);
+        }
+
+        void MarkImageInteraction()
+        {
+            imageInteractionGeneration++;
+            isInteractingWithImage = true;
+        }
+
+        void FinishImageInteraction(int referenceOffset, string imageId)
+        {
+            if (!IsCurrentPresenter())
+            {
+                return;
+            }
+
+            if (isPreviewing)
+            {
+                ShowEditor(focus: false);
+            }
+
+            if (!box.IsKeyboardFocusWithin)
+            {
+                box.Focus();
+            }
+            box.SelectImageReference(referenceOffset, imageId);
+
+            var finishingInteractionGeneration = imageInteractionGeneration;
+            var deferredWorkGeneration = _noteDeferredWorkGeneration;
+            Dispatcher.BeginInvoke(
+                (Action)(() =>
+                {
+                    if (!IsCurrentNoteDeferredWork(
+                            presenterGeneration,
+                            deferredWorkGeneration,
+                            box) ||
+                        finishingInteractionGeneration != imageInteractionGeneration)
+                    {
+                        return;
+                    }
+
+                    if (isPreviewing)
+                    {
+                        ShowEditor(focus: false);
+                    }
+                    if (!box.IsKeyboardFocusWithin)
+                    {
+                        box.Focus();
+                    }
+
+                    box.SelectImageReference(referenceOffset, imageId);
+                    pendingImageReferenceOffset = null;
+                    pendingImageId = null;
+                    isInteractingWithImage = false;
+                }),
+                System.Windows.Threading.DispatcherPriority.ContextIdle);
+        }
+
+        bool TrySelectImage(Point point, DependencyObject? originalSource)
+        {
+            if (!IsCurrentPresenter())
+            {
+                return false;
+            }
+
+            var hasImageReference = box.TryGetImageReferenceFromSource(
+                originalSource,
+                out var referenceOffset,
+                out var imageId);
+            if (!hasImageReference)
+            {
+                hasImageReference = box.TryGetImageReferenceFromPoint(
+                    point,
+                    out referenceOffset,
+                    out imageId);
+            }
+
+            if (!hasImageReference)
+            {
+                return false;
+            }
+
+            MarkImageInteraction();
+            pendingImageReferenceOffset = referenceOffset;
+            pendingImageId = imageId;
+            if (!box.IsKeyboardFocusWithin)
+            {
+                box.Focus();
+            }
+            box.SelectImageReference(referenceOffset, imageId);
+            return true;
+        }
+
+        bool TryPlaceCaretOnImageForDrop(Point point, DependencyObject? originalSource)
+        {
+            if (!IsCurrentPresenter())
+            {
+                return false;
+            }
+
+            var hasImageCaret = box.TryGetImageCaretFromSource(originalSource, out var caretIndex);
+            if (!hasImageCaret)
+            {
+                hasImageCaret = box.TryGetImageCaretFromPoint(point, out caretIndex);
+            }
+
+            if (!hasImageCaret)
+            {
+                return false;
+            }
+
+            if (!box.IsKeyboardFocusWithin)
+            {
+                box.Focus();
+            }
+            box.ClearImageSelection();
+            box.PlaceCaretAfterImage(caretIndex);
+
+            return true;
+        }
+
+        box.AllowDrop = true;
+        box.PreviewDragOver += (_, e) =>
+        {
+            if (!box.CanInsertImagesFromDataObject(e.Data))
+            {
+                if (!isPreviewing || !MarkdownTextBox.HasTextDropData(e.Data))
+                {
+                    return;
+                }
+
+                e.Effects = MarkdownTextBox.ResolveTextDropEffect(e);
+                e.Handled = e.Effects != DragDropEffects.None;
+                return;
+            }
+
+            e.Effects = DragDropEffects.Copy;
+            e.Handled = true;
+        };
+        box.PreviewDrop += (_, e) =>
+        {
+            if (!box.CanInsertImagesFromDataObject(e.Data))
+            {
+                if (!MarkdownTextBox.HasTextDropData(e.Data))
+                {
+                    return;
+                }
+                if (!box.ValidateTextDrop(e.Data))
+                {
+                    e.Effects = DragDropEffects.None;
+                    e.Handled = true;
+                    return;
+                }
+                if (isPreviewing)
+                {
+                    ShowEditorAtPreviewPoint(
+                        e.GetPosition(box),
+                        e.OriginalSource as DependencyObject,
+                        selectImage: false);
+                }
+                // Once edit mode is active, AvalonEdit still owns text insertion, move/copy
+                // semantics and undo grouping. Leave the Drop event unhandled here.
+                return;
+            }
+
+            var point = e.GetPosition(box);
+            if (isPreviewing)
+            {
+                ShowEditorAtPreviewPoint(
+                    point,
+                    e.OriginalSource as DependencyObject,
+                    selectImage: false,
+                    fromMouseClick: false);
+            }
+            else if (!TryPlaceCaretOnImageForDrop(point, e.OriginalSource as DependencyObject) &&
+                     box.TryGetCharacterIndexFromPoint(point, out var dropCaret))
+            {
+                box.CaretIndex = dropCaret;
+                box.Select(dropCaret, 0);
+            }
+
+            box.TryInsertImagesFromDataObject(e.Data);
+            e.Handled = true;
+        };
+
+        static void OpenMarkdownLink(string url)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(url)
+                {
+                    UseShellExecute = true
+                });
+            }
+            catch
+            {
+                // Link opening is optional; the note should never crash because a URL handler failed.
+            }
+        }
+
+        box.TextChanged += (_, _) =>
+        {
+            if (_applyingExternalNoteChange)
+            {
+                return;
+            }
+
+            _noteContentDirty = true;
+            InvalidateEdgeCapsulePreviewContent();
+            var wasScriptCapsule = _liveIsScriptCapsule;
+            var isScriptCapsule = IsScriptCapsuleDocument(box);
+            _liveIsScriptCapsule = isScriptCapsule;
+            if (wasScriptCapsule != isScriptCapsule)
+            {
+                RefreshCapsuleLabel();
+                RefreshPaperContextMenus();
+                _controller.RefreshTodoRowsForLinkedPaper(_paper.Id);
+            }
+            _controller.MarkDirty();
+        };
+
+        box.PreviewKeyDown += (_, e) =>
+        {
+            if ((Keyboard.Modifiers & ModifierKeys.Control) != ModifierKeys.Control)
+            {
+                return;
+            }
+
+            if (e.Key == Key.B)
+            {
+                box.WrapSelection("**", "**");
+                e.Handled = true;
+            }
+            else if (e.Key == Key.I)
+            {
+                box.WrapSelection("*", "*");
+                e.Handled = true;
+            }
+            else if (e.Key == Key.K)
+            {
+                box.InsertMarkdownLink();
+                e.Handled = true;
+            }
+        };
+
+        box.GotKeyboardFocus += (_, _) =>
+        {
+            TraceNoteRender($"GotKeyboardFocus isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode}");
+        };
+
+        box.LostKeyboardFocus += (_, _) =>
+        {
+            if (box.ContextMenu != null && box.ContextMenu.IsOpen)
+            {
+                TraceNoteRender("LostKeyboardFocus ignored: context menu open");
+                return;
+            }
+            if (box.IsImageContextMenuOpen)
+            {
+                TraceNoteRender("LostKeyboardFocus ignored: image context menu open");
+                return;
+            }
+            if (isEnteringEditorFromPreview)
+            {
+                TraceNoteRender($"LostKeyboardFocus ignored: entering editor isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode}");
+                return;
+            }
+            if (isOpeningImagePicker)
+            {
+                TraceNoteRender("LostKeyboardFocus ignored: image picker open");
+                return;
+            }
+            if (isInteractingWithImage)
+            {
+                TraceNoteRender($"LostKeyboardFocus ignored: image interaction isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode}");
+                return;
+            }
+            TraceNoteRender($"LostKeyboardFocus isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode}");
+            ShowPreview();
+        };
+
+        box.ImageContextMenuClosed += () =>
+        {
+            // The image menu steals keyboard focus while open. WPF restores focus
+            // asynchronously after Closed, so defer the decision: if focus hasn't
+            // come back but the window is still active (menu item clicked / Esc),
+            // hand focus back to the editor; only fall back to preview when the
+            // user actually left the window.
+            var deferredWorkGeneration = _noteDeferredWorkGeneration;
+            Dispatcher.BeginInvoke(
+                (Action)(() =>
+                {
+                    if (!IsCurrentNoteDeferredWork(
+                            presenterGeneration,
+                            deferredWorkGeneration,
+                            box))
+                    {
+                        return;
+                    }
+
+                    if (isPreviewing || box.IsKeyboardFocusWithin)
+                    {
+                        return;
+                    }
+                    if (IsActive)
+                    {
+                        TraceNoteRender("ImageContextMenuClosed: refocus editor");
+                        box.Focus();
+                    }
+                    else
+                    {
+                        TraceNoteRender("ImageContextMenuClosed: window inactive -> ShowPreview");
+                        ShowPreview();
+                    }
+                }),
+                System.Windows.Threading.DispatcherPriority.Background);
+        };
+
+        MouseButtonEventHandler noteMouseDown = (_, e) =>
+        {
+            if (box.RenderedTaskCheckBoxMouseDownHandled)
+            {
+                TraceNoteRender($"PreviewMouseLeftButtonDown ignored: rendered task checkbox isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode}");
+                return;
+            }
+
+            if (IsScrollBarInteractionSource(e.OriginalSource as DependencyObject, box))
+            {
+                TraceNoteRender($"PreviewMouseLeftButtonDown ignored: scrollbar isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode}");
+                return;
+            }
+
+            var textViewPoint = e.GetPosition(box.TextArea.TextView);
+            var point = e.GetPosition(box);
+            var originalSource = e.OriginalSource as DependencyObject;
+            imageInteractionGeneration++;
+            pendingImageReferenceOffset = null;
+            pendingImageId = null;
+            isInteractingWithImage = false;
+            TraceNoteRender($"PreviewMouseLeftButtonDown isPreviewing={isPreviewing} boxPreview={box.IsPreviewMode} handled={e.Handled}");
+            if (!isPreviewing)
+            {
+                if (TrySelectImage(point, originalSource))
+                {
+                    e.Handled = true;
+                    return;
+                }
+
+                box.ClearImageSelection();
+                if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control &&
+                    box.TryGetOpenableLinkFromTextViewPoint(textViewPoint, out var editUrl))
+                {
+                    OpenMarkdownLink(editUrl);
+                    e.Handled = true;
+                    return;
+                }
+
+                // 普通文本点击交给 AvalonEdit 落光标。按下（隧道阶段，早于 AvalonEdit）先按当前布局
+                // 冻结控制符显灵，避免落点触发 reveal 重排后，同一点在手势内命中两处偏移而被误判为拖选。
+                box.BeginCaretRevealGesture();
+                return;
+            }
+
+            if (box.TryGetOpenableLinkFromTextViewPoint(textViewPoint, out var url))
+            {
+                OpenMarkdownLink(url);
+                e.Handled = true;
+                return;
+            }
+
+            // 点入编辑前先冻结：快照为按下瞬间的显灵值（预览态为 None），ShowEditorAtPreviewPoint
+            // 内 SetPreviewMode(false) 的重排、落光标触发的 reveal 事件均保持在冻结布局上，
+            // 松开后再由 up 收尾按最终光标显灵一次。
+            box.BeginCaretRevealGesture();
+            // 本分支按下事件已置 Handled，AvalonEdit 不再建立捕获；显式捕获以保证手势收尾（up/丢捕获）必达。
+            box.CaptureMouse();
+            ShowEditorAtPreviewPoint(point, originalSource);
+            e.Handled = true;
+        };
+        box.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent, noteMouseDown, true);
+        box.AddHandler(
+            UIElement.MouseLeftButtonUpEvent,
+            new MouseButtonEventHandler((_, e) =>
+            {
+                // 手势结束（bubble 阶段晚于 AvalonEdit 内部 TextArea 的 up 处理），恢复显灵跟随光标。
+                box.EndCaretRevealGesture();
+
+                if (!pendingImageReferenceOffset.HasValue ||
+                    string.IsNullOrWhiteSpace(pendingImageId))
+                {
+                    return;
+                }
+
+                FinishImageInteraction(
+                    pendingImageReferenceOffset.Value,
+                    pendingImageId);
+                e.Handled = true;
+            }),
+            true);
+
+        // 鼠标捕获真正释放且不会再有 Up 送达（拖出窗口/中途失活）时兜底结束手势；
+        // 捕获若被 AvalonEdit 转到其内部 TextArea（Mouse.Captured != null）则保持，交给 up 收尾。
+        box.AddHandler(
+            UIElement.LostMouseCaptureEvent,
+            new MouseEventHandler((_, _) =>
+            {
+                if (box.IsCaretRevealGestureActive && Mouse.Captured == null)
+                {
+                    box.EndCaretRevealGesture();
+                }
+            }),
+            true);
+
+        box.MouseMove += (sender, e) =>
+        {
+            if (!isPreviewing &&
+                (Keyboard.Modifiers & ModifierKeys.Control) != ModifierKeys.Control)
+            {
+                box.SetInteractionCursor(Cursors.IBeam);
+                return;
+            }
+
+            var isOverLink = box.TryGetOpenableLinkFromTextViewPointFast(
+                e.GetPosition(box.TextArea.TextView),
+                out _);
+            if (isPreviewing)
+            {
+                box.SetInteractionCursor(isOverLink ? Cursors.Hand : Cursors.Arrow);
+            }
+            else
+            {
+                box.SetInteractionCursor(isOverLink ? Cursors.Hand : Cursors.IBeam);
+            }
+        };
+
+        box.MouseLeave += (_, _) =>
+        {
+            box.SetInteractionCursor(isPreviewing ? Cursors.Arrow : Cursors.IBeam);
+        };
+
+        editorMenu.Closed += (_, _) =>
+        {
+            if (!isOpeningImagePicker &&
+                !isPreviewing &&
+                !box.IsFocused &&
+                !box.IsKeyboardFocusWithin)
+            {
+                ShowPreview();
+            }
+        };
+
+        if (box.IsFocused || string.IsNullOrEmpty(box.Text))
+        {
+            ShowEditor();
+        }
+        else
+        {
+            ShowPreview();
+        }
+
+        return host;
+    }
+
+    private string[] SelectImagesFromFilePicker()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Filter = Strings.Get("ImageFileDialogFilter"),
+            Multiselect = true,
+            CheckFileExists = true
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return Array.Empty<string>();
+        }
+
+        return dialog.FileNames;
+    }
+
+    private void InsertImageFiles(MarkdownTextBox box, IEnumerable<string> paths)
+    {
+        try
+        {
+            box.InsertImagesFromFiles(paths);
+        }
+        catch (Exception ex)
+        {
+            ShowNoteImageImportFailure(ex);
+        }
+    }
+
+    private void ShowNoteImageImportFailure(Exception ex)
+    {
+        PaperNoticeDialog.Show(
+            this,
+            Strings.Get("ImageImportFailureTitle"),
+            Strings.Format("ImageImportFailureMessage", ex.Message));
+    }
+
+    private void ShowNotePasteRejected()
+    {
+        PaperNoticeDialog.Show(
+            this,
+            Strings.Get("NotePasteRejectedTitle"),
+            Strings.Get("NotePasteRejectedMessage"));
+    }
+
+
+    public void UpdateTextZoom()
+    {
+        if (_paper.Type != PaperTypes.Note ||
+            !BodySupports(PaperBodyCapabilities.TextZoom))
+        {
+            return;
+        }
+
+        var zoom = CurrentTextZoom();
+        if (_noteBox != null)
+        {
+            // zoom 是字号变化,SetTextZoom 改 box.FontSize 后由 WPF 触发整树重绘,
+            // MarkdownSemanticPresentation 的字体缩放逻辑会自动跟随。
+            _noteBox.SetTextZoom(zoom);
+        }
+        else
+        {
+            NotifyCurrentPaperBodyTypographyChanged();
+        }
+
+        if (_textZoomIndicator != null)
+        {
+            _textZoomIndicator.Text = $"{(int)Math.Round(zoom * 100)}%";
+            _textZoomIndicator.Foreground = WeakTextBrush;
+            _textZoomIndicator.Opacity = 0.55;
+            if (_textZoomIndicator.Parent is UIElement host)
+            {
+                host.Visibility = Math.Abs(zoom - 1.0) < 0.001 ? Visibility.Collapsed : Visibility.Visible;
+            }
+        }
+    }
+
+    private double CurrentTextZoom()
+    {
+        return Math.Clamp(_paper.TextZoom, 0.5, 1.5);
+    }
+
+    private void OnWindowPreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (_paper.Type != PaperTypes.Note ||
+            !BodySupports(PaperBodyCapabilities.TextZoom))
+        {
+            return;
+        }
+
+        if ((Keyboard.Modifiers & ModifierKeys.Control) != ModifierKeys.Control)
+        {
+            return;
+        }
+
+        var step = e.Delta > 0 ? 0.1 : -0.1;
+        _controller.SetPaperTextZoom(_paper, _paper.TextZoom + step);
+        e.Handled = true;
+    }
+
+    private void OpenMarkdownInDefaultEditor()
+    {
+        if (_paper.Type != PaperTypes.Note ||
+            !IsCurrentBodyProviderMarkdown)
+        {
+            return;
+        }
+
+        try
+        {
+            var path = WriteExternalMarkdownFile();
+            Process.Start(new ProcessStartInfo(path)
+            {
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                Strings.Format("OpenMarkdownFailureMessage", CurrentExternalMarkdownExtension(), ex.Message),
+                Strings.Get("OpenMarkdownFailureTitle"),
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
+    public void UpdateExternalMarkdownExtension()
+    {
+        if (_openMarkdownButton != null)
+        {
+            _openMarkdownButton.Content = ExternalOpenButtonLabel();
+            _openMarkdownButton.ToolTip = OpenMarkdownEditorToolTip();
+            _openMarkdownButton.Visibility =
+                _controller.State.ShowTopBarExternalOpenButton &&
+                IsCurrentBodyProviderMarkdown
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+        }
+    }
+
+
+    private string OpenMarkdownEditorToolTip()
+    {
+        return Strings.Format("ToolTipOpenMarkdownEditor", CurrentExternalMarkdownExtension());
+    }
+
+    private string ExternalOpenButtonLabel()
+    {
+        var extension = CurrentExternalMarkdownExtension().TrimStart('.');
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            extension = ExternalMarkdownFileExtensions.Default.TrimStart('.');
+        }
+
+        return extension.Length > 2
+            ? extension[..2].ToUpperInvariant()
+            : extension.ToUpperInvariant();
+    }
+
+    private string CurrentExternalMarkdownExtension()
+    {
+        return ExternalMarkdownFileExtensions.Normalize(_controller.State.ExternalMarkdownExtension);
+    }
+
+    private string WriteExternalMarkdownFile()
+    {
+        CommitPendingNoteContent();
+        var directory = _controller.NotesDirectory;
+        Directory.CreateDirectory(directory);
+
+        var fileStem = ExternalMarkdownFileStem();
+        var path = Path.Combine(directory, fileStem + CurrentExternalMarkdownExtension());
+        var text = _paper.Content ?? "";
+        text = _controller.ImageStore.ConvertMarkdownForExternalEditor(
+            _paper.Id,
+            text,
+            Path.Combine(directory, fileStem + "-images"),
+            directory);
+        File.WriteAllText(path, text, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+        return path;
+    }
+
+    private string ExternalMarkdownFileStem()
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(_paper.Id ?? ""));
+        return "paper-" + Convert.ToHexString(hash.AsSpan(0, 12)).ToLowerInvariant();
+    }
+
+    private readonly record struct ScriptCapsuleSpec(string Engine, string Script, bool UsePersistentProcess);
+    private readonly record struct ScriptCapsuleMarkerSpec(string Engine, bool UsePersistentProcess);
+
+    private string CapsuleIconText()
+    {
+        if (IsScriptCapsule())
+        {
+            return "⚡";
+        }
+
+        return _paper.Type == PaperTypes.Note ? "✎" : "✓";
+    }
+
+    private double CapsuleIconFontSizeForCurrentPaper()
+    {
+        return IsScriptCapsule() ? AppTypography.Scale(15) : CapsuleIconFontSize;
+    }
+
+    private bool IsScriptCapsule()
+    {
+        return IsCurrentScriptCapsule();
+    }
+
+    internal bool IsCurrentScriptCapsule()
+    {
+        if (_paper.Type != PaperTypes.Note ||
+            !IsCurrentBodyProviderMarkdown)
+        {
+            return false;
+        }
+
+        return _noteBox != null
+            ? _liveIsScriptCapsule
+            : IsScriptCapsuleContent(_paper.Content);
+    }
+
+    internal bool IsCurrentNoteEmpty()
+    {
+        if (_paper.Type != PaperTypes.Note ||
+            !IsCurrentBodyProviderMarkdown)
+        {
+            return false;
+        }
+
+        return string.IsNullOrWhiteSpace(_noteBox?.PersistentText ?? _paper.Content);
+    }
+
+    internal static bool IsScriptCapsuleContent(string? text)
+    {
+        return IsScriptCapsuleText(text ?? "");
+    }
+
+    private void ActivateFromCollapsedCapsule()
+    {
+        if (TryRunScriptCapsule())
+        {
+            return;
+        }
+
+        SetCollapsedState(false, activateOnExpand: true);
+    }
+
+    private void OpenCapsuleForEditing()
+    {
+        if (_paper.IsCollapsed)
+        {
+            if (HasDeepCapsuleSlotPlacement)
+            {
+                ShowMainWindowForDeepCapsuleActivation();
+                SetCollapsedState(false, alignExpandedToDockedEdge: true, activateOnExpand: true);
+            }
+            else
+            {
+                SetCollapsedState(false, activateOnExpand: true);
+            }
+
+            return;
+        }
+
+        EnsureExpandedSurfaceGeometry(alignToDockedEdge: HasDeepCapsuleSlotPlacement);
+        _controller.BringPaperToFront(_paper);
+    }
+
+    internal bool TryRunScriptCapsule()
+    {
+        if (!TryGetScriptCapsule(out var spec))
+        {
+            return false;
+        }
+
+        _ = RunScriptCapsuleAsync(spec);
+        return true;
+    }
+
+    private bool TryGetScriptCapsule(out ScriptCapsuleSpec spec)
+    {
+        spec = default;
+        if (_paper.Type != PaperTypes.Note ||
+            !IsCurrentBodyProviderMarkdown)
+        {
+            return false;
+        }
+
+        CommitPendingNoteContent();
+        var text = _paper.Content ?? "";
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        var firstLineEnd = text.IndexOfAny(new[] { '\r', '\n' });
+        var firstLine = firstLineEnd >= 0 ? text[..firstLineEnd] : text;
+        if (!TryParseScriptCapsuleMarker(firstLine, out var markerSpec))
+        {
+            return false;
+        }
+
+        var scriptStart = firstLineEnd < 0 ? text.Length : firstLineEnd;
+        if (scriptStart < text.Length && text[scriptStart] == '\r')
+        {
+            scriptStart++;
+        }
+        if (scriptStart < text.Length && text[scriptStart] == '\n')
+        {
+            scriptStart++;
+        }
+
+        spec = new ScriptCapsuleSpec(
+            markerSpec.Engine,
+            NormalizeScriptCapsuleIndent(text[scriptStart..]),
+            markerSpec.UsePersistentProcess);
+        return true;
+    }
+
+    private static bool IsScriptCapsuleText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        var firstLineEnd = text.IndexOfAny(new[] { '\r', '\n' });
+        var firstLine = firstLineEnd >= 0 ? text[..firstLineEnd] : text;
+        return TryParseScriptCapsuleMarker(firstLine, out _);
+    }
+
+    private static bool IsScriptCapsuleDocument(MarkdownTextBox box)
+    {
+        if (box.Document.TextLength <= 0)
+        {
+            return false;
+        }
+
+        var firstLine = box.Document.GetLineByNumber(1);
+        return TryParseScriptCapsuleMarker(box.Document.GetText(firstLine), out _);
+    }
+
+    private static bool TryParseScriptCapsuleMarker(string firstLine, out ScriptCapsuleMarkerSpec spec)
+    {
+        spec = default;
+        var marker = firstLine.Trim().ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "";
+        spec = marker switch
+        {
+            "!pf" or "!powerf" => new ScriptCapsuleMarkerSpec("auto", true),
+            "!p" or "!power" => new ScriptCapsuleMarkerSpec("auto", false),
+            "!pwsh" or "!ps7" => new ScriptCapsuleMarkerSpec("pwsh", false),
+            "!ps5" or "!winps" => new ScriptCapsuleMarkerSpec("powershell", false),
+            _ => default
+        };
+        return !string.IsNullOrEmpty(spec.Engine);
+    }
+
+    private async Task RunScriptCapsuleAsync(ScriptCapsuleSpec spec)
+    {
+        if (string.IsNullOrWhiteSpace(spec.Script))
+        {
+            ShowScriptCapsuleFailure(Strings.Get("ScriptCapsuleEmptyMessage"));
+            return;
+        }
+
+        if (spec.UsePersistentProcess && _controller.State.UsePersistentPowerShellProcess)
+        {
+            RunPersistentScriptCapsule(spec);
+            return;
+        }
+
+        string? path = null;
+        var executionId = Guid.NewGuid();
+        var registeredProcess = false;
+        try
+        {
+            path = WriteScriptCapsuleFile(spec.Script);
+            var executable = ResolvePowerShellExecutable(spec.Engine);
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                UseShellExecute = false,
+                CreateNoWindow = _controller.State.HideScriptRunWindow,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-NonInteractive");
+            startInfo.ArgumentList.Add("-ExecutionPolicy");
+            startInfo.ArgumentList.Add("Bypass");
+            startInfo.ArgumentList.Add("-EncodedCommand");
+            startInfo.ArgumentList.Add(EncodedPowerShellLaunchCommand(path));
+
+            using var process = new Process { StartInfo = startInfo };
+            if (!process.Start())
+            {
+                ShowScriptCapsuleFailure(Strings.Get("ScriptCapsuleStartFailureMessage"));
+                return;
+            }
+
+            lock (ActiveScriptProcessLock)
+            {
+                ActiveScriptProcesses[executionId] = process;
+                registeredProcess = true;
+            }
+
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            var output = await outputTask;
+            var error = await errorTask;
+            if (process.ExitCode != 0)
+            {
+                var detail = CompactScriptCapsuleOutput(output, error);
+                ShowScriptCapsuleFailure(Strings.Format("ScriptCapsuleExitFailureMessage", process.ExitCode, detail));
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowScriptCapsuleFailure(ex.Message);
+        }
+        finally
+        {
+            if (registeredProcess)
+            {
+                lock (ActiveScriptProcessLock)
+                {
+                    ActiveScriptProcesses.Remove(executionId);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                try
+                {
+                    File.Delete(path);
+                }
+                catch
+                {
+                    // Temporary script cleanup must not affect the user's note.
+                }
+            }
+        }
+    }
+
+    private void RunPersistentScriptCapsule(ScriptCapsuleSpec spec)
+    {
+        string? path = null;
+        var submitted = false;
+        try
+        {
+            path = WriteScriptCapsuleFile(spec.Script);
+            var executable = ResolvePowerShellExecutable(spec.Engine);
+            var process = EnsurePersistentScriptProcess(executable, _controller.State.HideScriptRunWindow);
+            var escapedPath = path.Replace("'", "''", StringComparison.Ordinal);
+            process.StandardInput.WriteLine("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8");
+            process.StandardInput.WriteLine("$OutputEncoding = [System.Text.Encoding]::UTF8");
+            process.StandardInput.WriteLine($"try {{ & '{escapedPath}' }} finally {{ Remove-Item -LiteralPath '{escapedPath}' -ErrorAction SilentlyContinue }}");
+            process.StandardInput.Flush();
+            submitted = true;
+        }
+        catch (Exception ex)
+        {
+            ShowScriptCapsuleFailure(ex.Message);
+        }
+        finally
+        {
+            if (!submitted && !string.IsNullOrWhiteSpace(path))
+            {
+                DeleteScriptCapsuleFile(path);
+            }
+        }
+    }
+
+    private static Process EnsurePersistentScriptProcess(string executable, bool hideWindow)
+    {
+        var key = $"{executable}|{hideWindow}";
+        lock (PersistentScriptProcessLock)
+        {
+            if (PersistentScriptProcesses.TryGetValue(key, out var existing) && !existing.HasExited)
+            {
+                return existing;
+            }
+
+            if (existing != null)
+            {
+                existing.Dispose();
+                PersistentScriptProcesses.Remove(key);
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                UseShellExecute = false,
+                CreateNoWindow = hideWindow,
+                RedirectStandardInput = true,
+                StandardInputEncoding = Encoding.UTF8
+            };
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-ExecutionPolicy");
+            startInfo.ArgumentList.Add("Bypass");
+            startInfo.ArgumentList.Add("-NoExit");
+            startInfo.ArgumentList.Add("-Command");
+            startInfo.ArgumentList.Add("-");
+
+            var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+            process.Exited += (_, _) =>
+            {
+                var ownsProcess = false;
+                lock (PersistentScriptProcessLock)
+                {
+                    if (PersistentScriptProcesses.TryGetValue(key, out var current) && ReferenceEquals(current, process))
+                    {
+                        PersistentScriptProcesses.Remove(key);
+                        ownsProcess = true;
+                    }
+                }
+
+                if (ownsProcess)
+                {
+                    process.Dispose();
+                }
+            };
+            process.Start();
+            PersistentScriptProcesses[key] = process;
+            return process;
+        }
+    }
+
+    private static string NormalizeScriptCapsuleIndent(string script)
+    {
+        if (string.IsNullOrEmpty(script))
+        {
+            return script;
+        }
+
+        var normalized = script.Replace("\r\n", "\n").Replace('\r', '\n');
+        var lines = normalized.Split('\n');
+        var commonIndent = int.MaxValue;
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            var indent = 0;
+            while (indent < line.Length && line[indent] is ' ' or '\t')
+            {
+                indent++;
+            }
+            commonIndent = Math.Min(commonIndent, indent);
+        }
+
+        if (commonIndent is int.MaxValue or <= 0)
+        {
+            return script;
+        }
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var remove = Math.Min(commonIndent, LeadingWhitespaceLength(lines[i]));
+            lines[i] = lines[i][remove..];
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static int LeadingWhitespaceLength(string text)
+    {
+        var length = 0;
+        while (length < text.Length && text[length] is ' ' or '\t')
+        {
+            length++;
+        }
+
+        return length;
+    }
+
+    private string WriteScriptCapsuleFile(string script)
+    {
+        var directory = ScriptCapsuleTempDirectory();
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, $"script-{_paper.Id}-{Guid.NewGuid():N}.ps1");
+        File.WriteAllText(path, script, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        return path;
+    }
+
+    private static string ScriptCapsuleTempDirectory()
+    {
+        var cacheRoot = AppStoragePaths.Current?.CacheDirectory ??
+            Path.Combine(Path.GetTempPath(), "PaperNook");
+        return Path.Combine(cacheRoot, "Scripts");
+    }
+
+    private static void DeleteScriptCapsuleFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch
+        {
+            // Temporary script cleanup must not affect the user's note.
+        }
+    }
+
+    internal static void CleanupOldScriptCapsuleTempFiles()
+    {
+        try
+        {
+            var directory = ScriptCapsuleTempDirectory();
+            if (!Directory.Exists(directory))
+            {
+                return;
+            }
+
+            var cutoff = DateTime.UtcNow - TimeSpan.FromDays(1);
+            foreach (var path in Directory.EnumerateFiles(directory, "script-*.ps1"))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(path) < cutoff)
+                    {
+                        File.Delete(path);
+                    }
+                }
+                catch
+                {
+                    // Best-effort cleanup only.
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup only.
+        }
+    }
+
+    private string ResolvePowerShellExecutable(string engine)
+    {
+        return ResolvePowerShellExecutable(_controller.State, engine);
+    }
+
+    internal static void EnsurePersistentScriptProcessForSettings(AppState state)
+    {
+        if (!state.UsePersistentPowerShellProcess)
+        {
+            return;
+        }
+
+        try
+        {
+            var executable = ResolvePowerShellExecutable(state, "auto");
+            EnsurePersistentScriptProcess(executable, state.HideScriptRunWindow);
+        }
+        catch
+        {
+            // Prewarming is best-effort; explicit script execution will report failures.
+        }
+    }
+
+    private static string ResolvePowerShellExecutable(AppState state, string engine)
+    {
+        if (engine == "pwsh")
+        {
+            return FindPowerShellExecutable("pwsh.exe")
+                ?? throw new InvalidOperationException(Strings.Get("ScriptCapsulePowerShell7NotFound"));
+        }
+
+        if (engine == "powershell")
+        {
+            return "powershell.exe";
+        }
+
+        if (state.PreferPowerShell7)
+        {
+            var pwsh = FindPowerShellExecutable("pwsh.exe");
+            if (!string.IsNullOrWhiteSpace(pwsh))
+            {
+                return pwsh;
+            }
+        }
+
+        return "powershell.exe";
+    }
+
+    private static string? FindPowerShellExecutable(string fileName)
+    {
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PATH")))
+        {
+            candidates.AddRange(
+                (Environment.GetEnvironmentVariable("PATH") ?? "")
+                    .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(path => Path.Combine(path.Trim(), fileName)));
+        }
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!string.IsNullOrWhiteSpace(programFiles))
+        {
+            candidates.Add(Path.Combine(programFiles, "PowerShell", "7", fileName));
+        }
+
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private static string EncodedPowerShellLaunchCommand(string path)
+    {
+        var escapedPath = path.Replace("'", "''", StringComparison.Ordinal);
+        var command = string.Join(
+            "; ",
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+            "$OutputEncoding = [System.Text.Encoding]::UTF8",
+            $"& '{escapedPath}'");
+        return Convert.ToBase64String(Encoding.Unicode.GetBytes(command));
+    }
+
+    private static string CompactScriptCapsuleOutput(string output, string error)
+    {
+        var text = string.Join(
+            Environment.NewLine,
+            new[] { error.Trim(), output.Trim() }.Where(s => !string.IsNullOrWhiteSpace(s)));
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return Strings.Get("ScriptCapsuleNoOutput");
+        }
+
+        const int maxLength = 1800;
+        return text.Length <= maxLength ? text : text[^maxLength..];
+    }
+
+    private void ShowScriptCapsuleFailure(string message)
+    {
+        if (_windowLifecycle != PaperWindowLifecycleState.Alive || IsClosed || !_paper.IsVisible)
+        {
+            return;
+        }
+
+        MessageBox.Show(
+            message,
+            Strings.Get("ScriptCapsuleFailureTitle"),
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
+    }
+
+
+    internal static void StopPersistentScriptProcesses() =>
+        StopPersistentScriptProcessesAsync().GetAwaiter().GetResult();
+
+    private static Task StopPersistentScriptProcessesAsync()
+    {
+        Process[] processes;
+        lock (PersistentScriptProcessLock)
+        {
+            processes = PersistentScriptProcesses.Values.Distinct().ToArray();
+            PersistentScriptProcesses.Clear();
+        }
+        return Task.WhenAll(processes.Select(process => StopScriptProcessAsync(process, persistent: true)));
+    }
+
+    internal static Task StopAllScriptProcessesAsync()
+    {
+        var persistent = StopPersistentScriptProcessesAsync();
+        Process[] active;
+        lock (ActiveScriptProcessLock)
+        {
+            active = ActiveScriptProcesses.Values.Distinct().ToArray();
+            ActiveScriptProcesses.Clear();
+        }
+        return Task.WhenAll(active.Select(process => StopScriptProcessAsync(process, persistent: false)).Append(persistent));
+    }
+
+    private static Task StopScriptProcessAsync(Process process, bool persistent) => Task.Run(async () =>
+    {
+        try
+        {
+            if (process.HasExited) return;
+            if (persistent)
+            {
+                try { if (process.StartInfo.RedirectStandardInput) process.StandardInput.Close(); }
+                catch { /* A broken pipe/already-exiting process needs no graceful request. */ }
+                using var grace = new System.Threading.CancellationTokenSource(250);
+                try { await process.WaitForExitAsync(grace.Token).ConfigureAwait(false); return; }
+                catch (OperationCanceledException) when (grace.IsCancellationRequested) { }
+            }
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            using var deadline = new System.Threading.CancellationTokenSource(1000);
+            await process.WaitForExitAsync(deadline.Token).ConfigureAwait(false);
+        }
+        catch { /* Process exit/disposal can race the execution task. Other processes still stop. */ }
+        finally
+        {
+            // Active execution owns its process disposal and temporary-file cleanup.
+            if (persistent) process.Dispose();
+        }
+    });
+}

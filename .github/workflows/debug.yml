@@ -1,0 +1,139 @@
+name: Debug
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".github/workflows/pages.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/plugin-samples.yml"
+      - "plugin-samples/**"
+      - "plugins/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debug-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Debug executables
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "true"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Read project metadata
+        id: meta
+        run: |
+          $project = [xml](Get-Content -LiteralPath .\PaperTodo.csproj -Raw)
+          $versionNodes = $project.SelectNodes('/Project/PropertyGroup/Version')
+          if ($versionNodes.Count -ne 1) {
+            throw "PaperTodo.csproj must define exactly one <Version> element (found $($versionNodes.Count))."
+          }
+
+          $version = ([string]$versionNodes[0].InnerText).Trim()
+          if ([string]::IsNullOrWhiteSpace($version) -or $version -match '\s') {
+            throw "PaperTodo.csproj <Version> is missing or contains whitespace: '$version'."
+          }
+
+          "self_contained_exe=PaperNook-v$version-debug-win-x64-self-contained.exe" >> $env:GITHUB_OUTPUT
+          "framework_dependent_exe=PaperNook-v$version-debug-win-x64-no-runtime.exe" >> $env:GITHUB_OUTPUT
+
+      - name: Restore
+        run: dotnet restore .\PaperTodo.csproj -r win-x64
+
+      - name: Publish Debug executables
+        env:
+          SELF_CONTAINED_EXE: ${{ steps.meta.outputs.self_contained_exe }}
+          FRAMEWORK_DEPENDENT_EXE: ${{ steps.meta.outputs.framework_dependent_exe }}
+        run: |
+          $debugDir = Join-Path $env:GITHUB_WORKSPACE "debug"
+          $selfContainedOut = Join-Path $env:RUNNER_TEMP "debug-self-contained"
+          $frameworkDependentOut = Join-Path $env:RUNNER_TEMP "debug-no-runtime"
+
+          Remove-Item -LiteralPath $debugDir, $selfContainedOut, $frameworkDependentOut -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $debugDir, $selfContainedOut, $frameworkDependentOut | Out-Null
+
+          dotnet publish .\PaperTodo.csproj `
+            -c Debug `
+            -r win-x64 `
+            --self-contained true `
+            --no-restore `
+            -o $selfContainedOut `
+            /p:PublishSingleFile=true `
+            /p:PublishReadyToRun=false `
+            /p:IncludeNativeLibrariesForSelfExtract=true `
+            /p:EnableCompressionInSingleFile=true `
+            /p:PublishTrimmed=false `
+            /p:EmbedAllSources=false `
+            /p:EmbedUntrackedSources=false `
+            /p:DebugType=embedded `
+            /p:DebugSymbols=true
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          Copy-Item -LiteralPath (Join-Path $selfContainedOut "PaperNook.exe") -Destination (Join-Path $debugDir $env:SELF_CONTAINED_EXE)
+
+          dotnet publish .\PaperTodo.csproj `
+            -c Debug `
+            -r win-x64 `
+            --self-contained false `
+            --no-restore `
+            -o $frameworkDependentOut `
+            /p:PublishSingleFile=true `
+            /p:PublishReadyToRun=false `
+            /p:IncludeNativeLibrariesForSelfExtract=true `
+            /p:EnableCompressionInSingleFile=false `
+            /p:PublishTrimmed=false `
+            /p:EmbedAllSources=false `
+            /p:EmbedUntrackedSources=false `
+            /p:DebugType=embedded `
+            /p:DebugSymbols=true
+
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          Copy-Item -LiteralPath (Join-Path $frameworkDependentOut "PaperNook.exe") -Destination (Join-Path $debugDir $env:FRAMEWORK_DEPENDENT_EXE)
+          Get-ChildItem -LiteralPath $debugDir -File | Sort-Object Name | Format-Table Name, Length
+
+      - name: Upload self-contained Debug executable
+        uses: actions/upload-artifact@v7
+        with:
+          path: debug/${{ steps.meta.outputs.self_contained_exe }}
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload framework-dependent Debug executable
+        uses: actions/upload-artifact@v7
+        with:
+          path: debug/${{ steps.meta.outputs.framework_dependent_exe }}
+          archive: false
+          if-no-files-found: error

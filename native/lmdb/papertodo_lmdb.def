@@ -1,0 +1,20 @@
+LIBRARY papertodo_lmdb
+
+EXPORTS
+    mdb_cursor_close
+    mdb_cursor_get
+    mdb_cursor_open
+    mdb_del
+    mdb_dbi_open
+    mdb_env_close
+    mdb_env_copy2
+    mdb_env_create
+    mdb_env_open
+    mdb_env_set_mapsize
+    mdb_env_set_maxdbs
+    mdb_get
+    mdb_put
+    mdb_strerror
+    mdb_txn_abort
+    mdb_txn_begin
+    mdb_txn_commit

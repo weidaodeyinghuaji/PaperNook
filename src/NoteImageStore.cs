@@ -1,0 +1,1731 @@
+using System;
+using System.IO;
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+
+namespace PaperTodo;
+
+public sealed class NoteImageStore : IDisposable
+{
+    // 4096 is the hard import/storage limit. Automatic compression targets 2048, but disabling
+    // compression may still store an untouched image between 2049 and 4096 pixels.
+    private const int MaxStoredDimension = 4096;
+    private const int AutoCompressedDimension = 2048;
+    private const int MaxImageBytes = 8 * 1024 * 1024;
+    private const int MaxInputImageBytes = 32 * 1024 * 1024;
+    private const int MaxTotalImageBytes = 120 * 1024 * 1024;
+    // Decoded pixels (not the 120 MB encoded store). One version per image; LRU drops cold
+    // off-viewport entries. Currently visible (viewport-protected) ids ignore the caps.
+    private const long MaxDecodedBitmapBytes = 50L * 1024 * 1024;
+    private const int MaxBitmapCacheEntries = 20;
+
+    private readonly object _gate = new();
+    private readonly Dictionary<string, NoteImageAsset> _images = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CachedBitmap> _bitmapCache = new(StringComparer.Ordinal);
+    private readonly LinkedList<string> _bitmapLru = new();
+    // ownerKey (note id) -> image ids currently constructed in that note's viewport
+    private readonly Dictionary<string, HashSet<string>> _viewportProtectedByOwner = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _viewportProtectedIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _retiredImageIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _verifiedImageIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _corruptedImageIds = new(StringComparer.Ordinal);
+    private readonly Queue<ReusableImageNumberRange> _reusableImageNumberRanges = new();
+    private LmdbImageDatabase? _database;
+    private long _totalImageBytes;
+    private long _totalDecodedBitmapBytes;
+    private int _nextImageNumber = 1;
+    private bool _writeDisabled;
+    private bool _disposed;
+
+    public string FilePath { get; } = Path.Combine(AppContext.BaseDirectory, "note-assets.lmdb");
+
+    public NoteImageStore() { }
+    internal NoteImageStore(string filePath) => FilePath = Path.GetFullPath(filePath);
+
+    public bool IsWriteDisabled => _writeDisabled;
+
+    public bool AutoCompressLargeImages { get; set; } = true;
+
+    internal void CreateSnapshot(string destinationPath)
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            RequireDatabaseLocked().CreateSnapshot(destinationPath);
+        }
+    }
+
+    public void Load()
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _database?.Dispose();
+            _database = null;
+            _images.Clear();
+            ClearBitmapCacheLocked();
+            ClearViewportProtectionLocked();
+            _retiredImageIds.Clear();
+            _verifiedImageIds.Clear();
+            _corruptedImageIds.Clear();
+            _reusableImageNumberRanges.Clear();
+            _totalImageBytes = 0;
+            _nextImageNumber = 1;
+            _writeDisabled = false;
+
+            if (!File.Exists(FilePath))
+            {
+                return;
+            }
+
+            try
+            {
+                _database = LmdbImageDatabase.Open(FilePath);
+                var index = _database.ReadIndex();
+                if (!TryValidateIndex(index, out var images, out var corruptedImageIds, out var totalBytes))
+                {
+                    _database.Dispose();
+                    _database = null;
+                    _writeDisabled = true;
+                    return;
+                }
+
+                _totalImageBytes = totalBytes;
+                _nextImageNumber = index.NextImageNumber;
+                _corruptedImageIds.UnionWith(corruptedImageIds);
+                ReplaceImages(images);
+            }
+            catch
+            {
+                _database?.Dispose();
+                _database = null;
+                _writeDisabled = true;
+            }
+        }
+    }
+
+    public bool TryGetAsset(string imageId, out NoteImageAsset asset)
+    {
+        lock (_gate)
+        {
+            return _images.TryGetValue(imageId, out asset!);
+        }
+    }
+
+    public bool IsImageCorrupted(string imageId)
+    {
+        lock (_gate)
+        {
+            return _corruptedImageIds.Contains(imageId);
+        }
+    }
+
+    /// <summary>
+    /// Returns the stored encoded image bytes after the same length/SHA validation used by
+    /// rendering and export. The returned byte array is detached from LMDB and safe to keep only
+    /// for the lifetime of a clipboard operation.
+    /// </summary>
+    public bool TryGetEncodedImageBytes(
+        string imageId,
+        out NoteImageAsset asset,
+        out byte[] bytes)
+    {
+        lock (_gate)
+        {
+            bytes = Array.Empty<byte>();
+            if (_corruptedImageIds.Contains(imageId) ||
+                !_images.TryGetValue(imageId, out asset!))
+            {
+                asset = null!;
+                return false;
+            }
+
+            return TryReadImageBytesLocked(asset, out bytes);
+        }
+    }
+
+    // Validate ownership and the bounded read under the same lock as the encoded read. Callers
+    // never receive a live asset object or an LMDB span from this operation.
+    internal bool TryReadOwnedImage(string noteId, string imageId, int maximumBytes,
+        out string mime, out byte[] bytes, out bool tooLarge)
+    {
+        lock (_gate)
+        {
+            mime = string.Empty;
+            bytes = [];
+            tooLarge = false;
+            if (_disposed || _corruptedImageIds.Contains(imageId) ||
+                !_images.TryGetValue(imageId, out var asset) ||
+                !string.Equals(asset.NoteId, noteId, StringComparison.Ordinal)) return false;
+            if (asset.ByteLength > maximumBytes)
+            {
+                tooLarge = true;
+                return false;
+            }
+            if (asset.ByteLength <= 0 || !TryReadImageBytesLocked(asset, out bytes)) return false;
+            mime = asset.Mime;
+            return true;
+        }
+    }
+
+    public BitmapSource? GetBitmapSource(
+        string imageId,
+        double targetPixelWidth = 0,
+        bool allowDecodeUpgrade = true,
+        bool protectInViewport = false)
+        => GetBitmapSourceCore(
+            imageId,
+            targetPixelWidth,
+            allowDecodeUpgrade,
+            protectInViewport,
+            cacheDecodedBitmap: true);
+
+    /// <summary>
+    /// Get the original-size bitmap for a one-shot clipboard copy without replacing the
+    /// display-sized cache entry. An already cached original-size bitmap is still reused.
+    /// </summary>
+    public BitmapSource? GetBitmapSourceForClipboard(string imageId)
+        => GetBitmapSourceCore(
+            imageId,
+            targetPixelWidth: 0,
+            allowDecodeUpgrade: true,
+            protectInViewport: false,
+            cacheDecodedBitmap: false);
+
+    private BitmapSource? GetBitmapSourceCore(
+        string imageId,
+        double targetPixelWidth,
+        bool allowDecodeUpgrade,
+        bool protectInViewport,
+        bool cacheDecodedBitmap)
+    {
+        NoteImageAsset asset;
+        lock (_gate)
+        {
+            if (_corruptedImageIds.Contains(imageId) ||
+                !_images.TryGetValue(imageId, out asset!))
+            {
+                return null;
+            }
+        }
+
+        var decodeWidth = DecodePixelWidth(asset, targetPixelWidth);
+        var requiredPixelWidth = decodeWidth > 0 ? decodeWidth : asset.Width;
+        BitmapSource? fallback = null;
+        lock (_gate)
+        {
+            if (_bitmapCache.TryGetValue(imageId, out var cached))
+            {
+                fallback = cached.Bitmap;
+                if (CacheSatisfiesRequired(cached.Bitmap.PixelWidth, requiredPixelWidth, allowDecodeUpgrade))
+                {
+                    if (protectInViewport)
+                    {
+                        ProtectViewportBitmapLocked(asset.NoteId, imageId);
+                    }
+
+                    TouchBitmapCacheLocked(imageId);
+                    return cached.Bitmap;
+                }
+            }
+        }
+
+        byte[] bytes;
+        lock (_gate)
+        {
+            if (!TryReadImageBytesLocked(asset, out bytes))
+            {
+                return fallback;
+            }
+        }
+
+        try
+        {
+            using var stream = new MemoryStream(bytes);
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.CreateOptions = BitmapCreateOptions.PreservePixelFormat;
+            if (decodeWidth > 0)
+            {
+                bitmap.DecodePixelWidth = decodeWidth;
+            }
+            bitmap.StreamSource = stream;
+            bitmap.EndInit();
+            bitmap.Freeze();
+
+            lock (_gate)
+            {
+                if (_bitmapCache.TryGetValue(imageId, out var current) &&
+                    CacheSatisfiesRequired(current.Bitmap.PixelWidth, requiredPixelWidth, allowDecodeUpgrade))
+                {
+                    if (protectInViewport)
+                    {
+                        ProtectViewportBitmapLocked(asset.NoteId, imageId);
+                    }
+
+                    TouchBitmapCacheLocked(imageId);
+                    return current.Bitmap;
+                }
+
+                if (cacheDecodedBitmap)
+                {
+                    // Pin before trim so a multi-image visual-line rebuild cannot evict siblings.
+                    if (protectInViewport)
+                    {
+                        ProtectViewportBitmapLocked(asset.NoteId, imageId);
+                    }
+
+                    StoreBitmapCacheLocked(imageId, bitmap);
+                }
+            }
+
+            return bitmap;
+        }
+        catch
+        {
+            // The blob has already passed length and SHA-256 verification. A WIC/codec or memory
+            // failure is not evidence that the stored data is corrupt, so leave it retryable.
+            return fallback;
+        }
+    }
+
+    /// <summary>
+    /// Replace the set of on-screen image ids for one note viewport. Protected ids are never
+    /// LRU-evicted (caps only apply to off-screen cold entries).
+    /// </summary>
+    public void SetViewportProtectedBitmapIds(string ownerKey, IReadOnlyCollection<string> imageIds)
+    {
+        if (string.IsNullOrWhiteSpace(ownerKey))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (imageIds.Count == 0)
+            {
+                if (_viewportProtectedByOwner.Remove(ownerKey))
+                {
+                    RebuildViewportProtectedUnionLocked();
+                }
+
+                return;
+            }
+
+            _viewportProtectedByOwner[ownerKey] = new HashSet<string>(imageIds, StringComparer.Ordinal);
+            RebuildViewportProtectedUnionLocked();
+        }
+    }
+
+    /// <summary>
+    /// Preview (!allowDecodeUpgrade): keep any cached decode. Once resize settles, require the
+    /// exact physical-pixel width requested by the current display layout.
+    /// </summary>
+    private static bool CacheSatisfiesRequired(
+        int cachedPixelWidth,
+        int requiredPixelWidth,
+        bool allowDecodeUpgrade)
+    {
+        if (!allowDecodeUpgrade)
+        {
+            return true;
+        }
+
+        return cachedPixelWidth == requiredPixelWidth;
+    }
+
+    public void ReleaseNoteBitmapCache(string noteId)
+    {
+        if (string.IsNullOrWhiteSpace(noteId))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_viewportProtectedByOwner.Remove(noteId))
+            {
+                RebuildViewportProtectedUnionLocked();
+            }
+
+            foreach (var imageId in _images.Values
+                         .Where(asset => string.Equals(asset.NoteId, noteId, StringComparison.Ordinal))
+                         .Select(asset => asset.Id)
+                         .ToList())
+            {
+                RemoveCachedBitmapsFor(imageId);
+            }
+        }
+    }
+
+    public NoteImageAsset ImportBitmapSource(string noteId, BitmapSource source)
+    {
+        if (_writeDisabled)
+        {
+            throw new InvalidOperationException(Strings.Get("ImageStoreUnavailable"));
+        }
+
+        if (string.IsNullOrWhiteSpace(noteId))
+        {
+            throw new InvalidOperationException(Strings.Get("ImageImportInvalidNote"));
+        }
+
+        var image = PrepareBitmapSource(source);
+        return AddEncodedImage(
+            noteId,
+            image.Bytes,
+            image.Mime,
+            image.OriginalName,
+            image.Width,
+            image.Height);
+    }
+
+    public NoteImageAsset ImportImageFile(string noteId, string path)
+    {
+        if (_writeDisabled)
+        {
+            throw new InvalidOperationException(Strings.Get("ImageStoreUnavailable"));
+        }
+
+        if (string.IsNullOrWhiteSpace(noteId))
+        {
+            throw new InvalidOperationException(Strings.Get("ImageImportInvalidNote"));
+        }
+
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            throw new FileNotFoundException(Strings.Get("ImageImportFileMissing"), path);
+        }
+
+        ThrowIfUnsupportedImageFiles(new[] { path });
+
+        var image = PrepareImageFile(path);
+        return AddEncodedImage(
+            noteId,
+            image.Bytes,
+            image.Mime,
+            image.OriginalName,
+            image.Width,
+            image.Height);
+    }
+
+    public IReadOnlyList<NoteImageAsset> ImportImageFiles(string noteId, IEnumerable<string> paths)
+    {
+        if (_writeDisabled)
+        {
+            throw new InvalidOperationException(Strings.Get("ImageStoreUnavailable"));
+        }
+
+        if (string.IsNullOrWhiteSpace(noteId))
+        {
+            throw new InvalidOperationException(Strings.Get("ImageImportInvalidNote"));
+        }
+
+        var candidatePaths = paths.ToList();
+        ThrowIfUnsupportedImageFiles(candidatePaths);
+
+        var images = new List<PreparedImage>(candidatePaths.Count);
+        foreach (var path in candidatePaths)
+        {
+            images.Add(PrepareImageFile(path));
+        }
+
+        return AddEncodedImages(noteId, images);
+    }
+
+    private PreparedImage PrepareImageFile(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            throw new FileNotFoundException(Strings.Get("ImageImportFileMissing"), path);
+        }
+
+        var sourceLength = new FileInfo(path).Length;
+        if (sourceLength > MaxInputImageBytes)
+        {
+            throw new InvalidDataException(Strings.Format("ImageImportSourceTooLarge", MaxInputImageBytes / 1024 / 1024));
+        }
+
+        if (!AutoCompressLargeImages && sourceLength > MaxImageBytes)
+        {
+            throw new InvalidDataException(Strings.Format("ImageImportTooLargeCompressionDisabled", MaxImageBytes / 1024 / 1024));
+        }
+
+        var originalName = Path.GetFileName(path);
+        var bytes = File.ReadAllBytes(path);
+        if (bytes.Length > MaxInputImageBytes)
+        {
+            throw new InvalidDataException(Strings.Format("ImageImportSourceTooLarge", MaxInputImageBytes / 1024 / 1024));
+        }
+        if (!AutoCompressLargeImages && bytes.Length > MaxImageBytes)
+        {
+            throw new InvalidDataException(Strings.Format("ImageImportTooLargeCompressionDisabled", MaxImageBytes / 1024 / 1024));
+        }
+        if (!TryReadBitmapInfo(bytes, out var frame, out var width, out var height))
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportUnsupported"));
+        }
+
+        ValidateImageDimensions(width, height);
+
+        var mime = MimeFromEncodedBytes(bytes)
+            ?? throw new InvalidDataException(Strings.Get("ImageImportUnsupported"));
+        if (!AutoCompressLargeImages || !RequiresAutomaticCompression(bytes.Length, width, height))
+        {
+            return new PreparedImage(bytes, mime, originalName, width, height);
+        }
+
+        var encoded = CompressImage(frame, bytes, mime);
+        if (!TryReadBitmapInfo(encoded.Bytes, out _, out width, out height))
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportCompressionFailed"));
+        }
+        ValidateCompressedDimensions(width, height);
+        return new PreparedImage(encoded.Bytes, encoded.Mime, originalName, width, height);
+    }
+
+    private PreparedImage PrepareBitmapSource(BitmapSource source)
+    {
+        ValidateImageDimensions(source.PixelWidth, source.PixelHeight);
+
+        // Clipboard CF_DIB / GetImage often reports Bgra32 with every alpha byte = 0 while RGB
+        // still holds the screenshot. Encoding that as PNG makes the whole image invisible.
+        source = NormalizeVacuousAlpha(source);
+
+        byte[] originalBytes;
+        try
+        {
+            originalBytes = EncodePng(source);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportCompressionFailed"), ex);
+        }
+
+        if (!AutoCompressLargeImages)
+        {
+            if (originalBytes.Length > MaxImageBytes)
+            {
+                throw new InvalidDataException(Strings.Format("ImageImportTooLargeCompressionDisabled", MaxImageBytes / 1024 / 1024));
+            }
+
+            return new PreparedImage(
+                originalBytes,
+                "image/png",
+                "clipboard",
+                source.PixelWidth,
+                source.PixelHeight);
+        }
+
+        if (!RequiresAutomaticCompression(originalBytes.Length, source.PixelWidth, source.PixelHeight))
+        {
+            return new PreparedImage(
+                originalBytes,
+                "image/png",
+                "clipboard",
+                source.PixelWidth,
+                source.PixelHeight);
+        }
+
+        var encoded = CompressImage(source, originalBytes, "image/png");
+        if (!TryReadBitmapInfo(encoded.Bytes, out _, out var width, out var height))
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportCompressionFailed"));
+        }
+        ValidateCompressedDimensions(width, height);
+
+        return new PreparedImage(encoded.Bytes, encoded.Mime, "clipboard", width, height);
+    }
+
+    public bool TryWriteImageFile(string imageId, string path)
+    {
+        byte[] bytes;
+        lock (_gate)
+        {
+            if (!_images.TryGetValue(imageId, out var asset) ||
+                !TryReadImageBytesLocked(asset, out bytes))
+            {
+                return false;
+            }
+        }
+
+        try
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            File.WriteAllBytes(path, bytes);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public string ConvertMarkdownForExternalEditor(
+        string noteId,
+        string markdown,
+        string imageDirectory,
+        string allowedRootDirectory)
+    {
+        if (string.IsNullOrEmpty(markdown))
+        {
+            return markdown;
+        }
+
+        var references = MarkdownImageReferences.Enumerate(markdown).ToList();
+        if (references.Count == 0)
+        {
+            return markdown;
+        }
+
+        if (!TryPrepareImageDirectory(imageDirectory, allowedRootDirectory, out var safeImageDirectory))
+        {
+            throw new IOException(Strings.Get("ExternalMarkdownImageExportFailed"));
+        }
+
+        var exported = new Dictionary<string, string>(StringComparer.Ordinal);
+        return MarkdownImageReferences.ReplaceForExternalMarkdown(
+            markdown,
+            imageId =>
+            {
+                if (exported.TryGetValue(imageId, out var existing))
+                {
+                    return existing;
+                }
+
+                NoteImageAsset asset;
+                lock (_gate)
+                {
+                    if (!_images.TryGetValue(imageId, out asset!) ||
+                        !string.Equals(asset.NoteId, noteId, StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException(Strings.Get("ExternalMarkdownImageExportFailed"));
+                    }
+                }
+
+                var extension = ExtensionFromMime(asset.Mime);
+                var fileName = $"{asset.Id}{extension}";
+                var fullPath = Path.Combine(safeImageDirectory, fileName);
+                if (!TryWriteImageFile(asset.Id, fullPath))
+                {
+                    throw new IOException(Strings.Get("ExternalMarkdownImageExportFailed"));
+                }
+
+                var relative = "./" + Path.GetFileName(safeImageDirectory) + "/" + fileName;
+                exported[imageId] = relative;
+                return relative;
+            });
+    }
+
+    public string CloneForeignImageReferencesForNote(string noteId, string markdown)
+    {
+        if (string.IsNullOrWhiteSpace(noteId) || string.IsNullOrEmpty(markdown))
+        {
+            return markdown;
+        }
+
+        var references = MarkdownImageReferences.Enumerate(markdown).ToList();
+        if (references.Count == 0)
+        {
+            return markdown;
+        }
+
+        lock (_gate)
+        {
+            var foreignAssets = references
+                .Select(reference => reference.ImageId)
+                .Distinct(StringComparer.Ordinal)
+                .Select(imageId => _images.GetValueOrDefault(imageId))
+                .Where(asset => asset != null &&
+                    !string.Equals(asset.NoteId, noteId, StringComparison.Ordinal))
+                .Cast<NoteImageAsset>()
+                .ToList();
+            if (foreignAssets.Count == 0)
+            {
+                return markdown;
+            }
+
+            if (_writeDisabled)
+            {
+                throw new InvalidOperationException(Strings.Get("ImageStoreUnavailable"));
+            }
+
+            var additionalBytes = foreignAssets.Sum(asset => (long)asset.ByteLength);
+            if (_totalImageBytes + additionalBytes > MaxTotalImageBytes)
+            {
+                throw new InvalidDataException(Strings.Format("ImageImportTotalTooLarge", MaxTotalImageBytes / 1024 / 1024));
+            }
+
+            var replacements = new Dictionary<string, string>(StringComparer.Ordinal);
+            var writes = new List<LmdbImageWrite>(foreignAssets.Count);
+            var nextImageNumber = _nextImageNumber;
+            var reusableImageNumberRanges = CloneReusableImageNumberRangesLocked();
+            foreach (var source in foreignAssets)
+            {
+                if (!TryReadImageBytesLocked(source, out var bytes))
+                {
+                    throw new InvalidDataException(Strings.Get("ImageStoreUnavailable"));
+                }
+
+                var clone = new NoteImageAsset
+                {
+                    Id = AllocateImageIdLocked(ref nextImageNumber, reusableImageNumberRanges),
+                    NoteId = noteId,
+                    Mime = source.Mime,
+                    Width = source.Width,
+                    Height = source.Height,
+                    Sha256 = source.Sha256,
+                    ByteLength = source.ByteLength,
+                    OriginalName = source.OriginalName,
+                    CreatedAt = DateTimeOffset.UtcNow
+                };
+                writes.Add(new LmdbImageWrite(clone, bytes));
+                replacements[source.Id] = clone.Id;
+            }
+
+            RequireDatabaseLocked().AddImages(writes, nextImageNumber);
+            foreach (var write in writes)
+            {
+                _images.Add(write.Asset.Id, write.Asset);
+                _verifiedImageIds.Add(write.Asset.Id);
+            }
+            _totalImageBytes += additionalBytes;
+            _nextImageNumber = nextImageNumber;
+            ReplaceReusableImageNumberRangesLocked(reusableImageNumberRanges);
+
+            return ReplaceImageReferenceIds(markdown, replacements);
+        }
+    }
+
+    private static bool TryPrepareImageDirectory(
+        string imageDirectory,
+        string allowedRootDirectory,
+        out string safeImageDirectory)
+    {
+        safeImageDirectory = "";
+        try
+        {
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(allowedRootDirectory));
+            var candidate = Path.GetFullPath(imageDirectory);
+            var rootPrefix = root + Path.DirectorySeparatorChar;
+            if (!candidate.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            Directory.CreateDirectory(root);
+            if (Directory.Exists(candidate))
+            {
+                var attributes = File.GetAttributes(candidate);
+                var recursive = (attributes & FileAttributes.ReparsePoint) == 0;
+                Directory.Delete(candidate, recursive);
+            }
+            Directory.CreateDirectory(candidate);
+            safeImageDirectory = candidate;
+            return true;
+        }
+        catch
+        {
+            safeImageDirectory = "";
+            return false;
+        }
+    }
+
+    private static string ReplaceImageReferenceIds(
+        string markdown,
+        IReadOnlyDictionary<string, string> replacements)
+    {
+        if (replacements.Count == 0)
+        {
+            return markdown;
+        }
+
+        var builder = new StringBuilder(markdown.Length);
+        var cursor = 0;
+        foreach (var reference in MarkdownImageReferences.Enumerate(markdown))
+        {
+            builder.Append(markdown, cursor, reference.LineStart - cursor);
+            builder.Append(replacements.TryGetValue(reference.ImageId, out var replacementId)
+                ? reference.WithUrl(MarkdownImageReferences.UriPrefix + replacementId)
+                : markdown.Substring(reference.LineStart, reference.LineLength));
+            cursor = reference.LineStart + reference.LineLength;
+        }
+
+        builder.Append(markdown, cursor, markdown.Length - cursor);
+        return builder.ToString();
+    }
+
+    public void ReleaseUnreferencedBitmapCache(AppState state)
+    {
+        if (_writeDisabled)
+        {
+            return;
+        }
+
+        var referencedImageIds = state.Papers
+            .Where(paper => paper.Type == PaperTypes.Note)
+            .SelectMany(paper => MarkdownImageReferences.CollectImageIds(paper.Content))
+            .ToHashSet(StringComparer.Ordinal);
+
+        lock (_gate)
+        {
+            foreach (var asset in _images.Values)
+            {
+                if (!referencedImageIds.Contains(asset.Id))
+                {
+                    // Keep the original bytes for undo; only decoded pixels are disposable
+                    // while the image is absent from the current document.
+                    RemoveCachedBitmapsFor(asset.Id);
+                }
+            }
+        }
+    }
+
+    internal void CollectUnprotectedImages(IReadOnlySet<string> protectedImageIds)
+    {
+        if (_writeDisabled)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            var removedIds = _images.Values
+                .Where(asset => !protectedImageIds.Contains(asset.Id))
+                .Select(asset => asset.Id)
+                .ToList();
+            if (removedIds.Count == 0)
+            {
+                return;
+            }
+
+            RequireDatabaseLocked().DeleteImages(removedIds);
+            foreach (var imageId in removedIds)
+            {
+                RemoveImageLocked(imageId, reserveIdUntilRestart: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Builds the free-id pool for this session. Pass the same protected set used for startup GC.
+    /// When <paramref name="protectedImageIds"/> is null (protection scan failed or skipped),
+    /// reuse is disabled so dangling markdown ids cannot be reassigned.
+    /// </summary>
+    internal void PrepareReusableImageNumbers(IReadOnlySet<string>? protectedImageIds)
+    {
+        lock (_gate)
+        {
+            _reusableImageNumberRanges.Clear();
+            if (_writeDisabled ||
+                _nextImageNumber <= 1 ||
+                protectedImageIds == null)
+            {
+                return;
+            }
+
+            // Startup collection runs before editors and undo stacks exist, so ids retired by
+            // that pass can safely join the new-session allocation pool.
+            _retiredImageIds.Clear();
+
+            var occupiedNumbers = new SortedSet<int>();
+            void OccupyImageId(string imageId)
+            {
+                if (int.TryParse(imageId, NumberStyles.None, CultureInfo.InvariantCulture, out var number) &&
+                    number > 0 &&
+                    number < _nextImageNumber)
+                {
+                    occupiedNumbers.Add(number);
+                }
+            }
+
+            // Live and corrupted store keys, plus every id still referenced by current state,
+            // backup, or recovery snapshots — including holes where the blob is already missing.
+            foreach (var imageId in _images.Keys)
+            {
+                OccupyImageId(imageId);
+            }
+
+            foreach (var imageId in _corruptedImageIds)
+            {
+                OccupyImageId(imageId);
+            }
+
+            foreach (var imageId in protectedImageIds)
+            {
+                OccupyImageId(imageId);
+            }
+
+            var rangeStart = 1;
+            foreach (var occupiedNumber in occupiedNumbers)
+            {
+                if (rangeStart < occupiedNumber)
+                {
+                    _reusableImageNumberRanges.Enqueue(
+                        new ReusableImageNumberRange(rangeStart, occupiedNumber - 1));
+                }
+
+                rangeStart = occupiedNumber + 1;
+            }
+
+            if (rangeStart < _nextImageNumber)
+            {
+                _reusableImageNumberRanges.Enqueue(
+                    new ReusableImageNumberRange(rangeStart, _nextImageNumber - 1));
+            }
+        }
+    }
+
+    public static bool IsSupportedImageFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        return Path.GetExtension(path).ToLowerInvariant() is
+            ".png" or ".jpg" or ".jpeg" or ".bmp" or ".gif" or ".tif" or ".tiff" or ".webp";
+    }
+
+    private static void ThrowIfUnsupportedImageFiles(IReadOnlyList<string> paths)
+    {
+        var unsupported = paths
+            .Where(path => !IsSupportedImageFile(path))
+            .ToList();
+        if (unsupported.Count == 0)
+        {
+            return;
+        }
+
+        var displayedNames = unsupported
+            .Take(3)
+            .Select(DisplayImageFileName);
+        var summary = string.Join(", ", displayedNames);
+        if (unsupported.Count > 3)
+        {
+            summary += Strings.Format("ImageImportAdditionalFiles", unsupported.Count - 3);
+        }
+
+        throw new InvalidDataException(Strings.Format("ImageImportUnsupportedFiles", summary));
+    }
+
+    private static string DisplayImageFileName(string path)
+    {
+        string fileName;
+        try
+        {
+            fileName = Path.GetFileName(path);
+        }
+        catch
+        {
+            return Strings.Get("ImageImportUnknownFile");
+        }
+
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return Strings.Get("ImageImportUnknownFile");
+        }
+
+        const int maxTextElements = 48;
+        var textElementStarts = StringInfo.ParseCombiningCharacters(fileName);
+        return textElementStarts.Length <= maxTextElements
+            ? fileName
+            : fileName[..textElementStarts[maxTextElements]] + "…";
+    }
+
+    private NoteImageAsset AddEncodedImage(
+        string noteId,
+        byte[] bytes,
+        string mime,
+        string originalName,
+        int width = 0,
+        int height = 0)
+    {
+        if ((width <= 0 || height <= 0) &&
+            !TryReadBitmapInfo(bytes, out _, out width, out height))
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportUnsupported"));
+        }
+
+        var image = new PreparedImage(bytes, mime, originalName, width, height);
+        return AddEncodedImages(noteId, new[] { image })[0];
+    }
+
+    private IReadOnlyList<NoteImageAsset> AddEncodedImages(
+        string noteId,
+        IReadOnlyList<PreparedImage> images)
+    {
+        if (images.Count == 0)
+        {
+            return Array.Empty<NoteImageAsset>();
+        }
+
+        foreach (var image in images)
+        {
+            if (image.Bytes.Length <= 0)
+            {
+                throw new InvalidDataException(Strings.Get("ImageImportUnsupported"));
+            }
+
+            if (image.Bytes.Length > MaxImageBytes)
+            {
+                throw new InvalidDataException(Strings.Format("ImageImportTooLarge", MaxImageBytes / 1024 / 1024));
+            }
+
+            if (image.Width <= 0 || image.Height <= 0)
+            {
+                throw new InvalidDataException(Strings.Get("ImageImportUnsupported"));
+            }
+
+            if (image.Width > MaxStoredDimension || image.Height > MaxStoredDimension)
+            {
+                throw new InvalidDataException(Strings.Format("ImageImportDimensionsTooLarge", MaxStoredDimension));
+            }
+        }
+
+        lock (_gate)
+        {
+            if (_writeDisabled)
+            {
+                throw new InvalidOperationException(Strings.Get("ImageStoreUnavailable"));
+            }
+
+            var additionalBytes = images.Sum(image => (long)image.Bytes.Length);
+            if (_totalImageBytes + additionalBytes > MaxTotalImageBytes)
+            {
+                throw new InvalidDataException(Strings.Format("ImageImportTotalTooLarge", MaxTotalImageBytes / 1024 / 1024));
+            }
+
+            var writes = new List<LmdbImageWrite>(images.Count);
+            var nextImageNumber = _nextImageNumber;
+            var reusableImageNumberRanges = CloneReusableImageNumberRangesLocked();
+            foreach (var image in images)
+            {
+                var asset = new NoteImageAsset
+                {
+                    Id = AllocateImageIdLocked(ref nextImageNumber, reusableImageNumberRanges),
+                    NoteId = noteId,
+                    Mime = NormalizeMime(image.Mime),
+                    Width = image.Width,
+                    Height = image.Height,
+                    Sha256 = Convert.ToHexString(SHA256.HashData(image.Bytes)).ToLowerInvariant(),
+                    ByteLength = image.Bytes.Length,
+                    OriginalName = string.IsNullOrWhiteSpace(image.OriginalName) ? null : image.OriginalName,
+                    CreatedAt = DateTimeOffset.UtcNow
+                };
+                writes.Add(new LmdbImageWrite(asset, image.Bytes));
+            }
+
+            RequireDatabaseLocked().AddImages(writes, nextImageNumber);
+            foreach (var write in writes)
+            {
+                _images.Add(write.Asset.Id, write.Asset);
+                _verifiedImageIds.Add(write.Asset.Id);
+            }
+            _totalImageBytes += additionalBytes;
+            _nextImageNumber = nextImageNumber;
+            ReplaceReusableImageNumberRangesLocked(reusableImageNumberRanges);
+            return writes.Select(write => write.Asset).ToList();
+        }
+    }
+
+    private string AllocateImageIdLocked(
+        ref int nextImageNumber,
+        Queue<ReusableImageNumberRange> reusableImageNumberRanges)
+    {
+        while (reusableImageNumberRanges.Count > 0)
+        {
+            var range = reusableImageNumberRanges.Peek();
+            var number = range.NextNumber++;
+            if (range.NextNumber > range.LastNumber)
+            {
+                reusableImageNumberRanges.Dequeue();
+            }
+
+            var id = FormatImageId(number);
+            if (!_images.ContainsKey(id) &&
+                !_retiredImageIds.Contains(id) &&
+                !_corruptedImageIds.Contains(id))
+            {
+                return id;
+            }
+        }
+
+        while (nextImageNumber <= 99_999_999)
+        {
+            var number = nextImageNumber++;
+            var id = FormatImageId(number);
+            if (!_images.ContainsKey(id) &&
+                !_retiredImageIds.Contains(id) &&
+                !_corruptedImageIds.Contains(id))
+            {
+                return id;
+            }
+        }
+
+        throw new InvalidOperationException(Strings.Get("ImageImportUnsupported"));
+    }
+
+    private Queue<ReusableImageNumberRange> CloneReusableImageNumberRangesLocked()
+    {
+        var clone = new Queue<ReusableImageNumberRange>(_reusableImageNumberRanges.Count);
+        foreach (var range in _reusableImageNumberRanges)
+        {
+            clone.Enqueue(new ReusableImageNumberRange(range.NextNumber, range.LastNumber));
+        }
+
+        return clone;
+    }
+
+    private void ReplaceReusableImageNumberRangesLocked(
+        Queue<ReusableImageNumberRange> ranges)
+    {
+        _reusableImageNumberRanges.Clear();
+        foreach (var range in ranges)
+        {
+            _reusableImageNumberRanges.Enqueue(range);
+        }
+    }
+
+    private static string FormatImageId(int number)
+        => number < 1000
+            ? number.ToString("000", CultureInfo.InvariantCulture)
+            : number.ToString(CultureInfo.InvariantCulture);
+
+    private sealed class ReusableImageNumberRange(int nextNumber, int lastNumber)
+    {
+        public int NextNumber { get; set; } = nextNumber;
+
+        public int LastNumber { get; } = lastNumber;
+    }
+
+    private static void ValidateImageDimensions(int width, int height)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportUnsupported"));
+        }
+
+        if (width > MaxStoredDimension || height > MaxStoredDimension)
+        {
+            throw new InvalidDataException(Strings.Format("ImageImportDimensionsTooLarge", MaxStoredDimension));
+        }
+    }
+
+    private static bool RequiresAutomaticCompression(int byteLength, int width, int height)
+        => byteLength > MaxImageBytes ||
+            width > AutoCompressedDimension ||
+            height > AutoCompressedDimension;
+
+    private static void ValidateCompressedDimensions(int width, int height)
+    {
+        if (width <= 0 ||
+            height <= 0 ||
+            width > AutoCompressedDimension ||
+            height > AutoCompressedDimension)
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportCompressionFailed"));
+        }
+    }
+
+    private static (byte[] Bytes, string Mime) CompressImage(
+        BitmapSource source,
+        byte[] originalBytes,
+        string originalMime)
+    {
+        // Re-encoding these formats would silently discard animation or additional frames.
+        if (originalMime is "image/gif" or "image/tiff")
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportCompressionUnsafe"));
+        }
+
+        try
+        {
+            var resized = ResizeBitmapSource(source, AutoCompressedDimension);
+            (byte[] Bytes, string Mime) encoded;
+            if (string.Equals(originalMime, "image/jpeg", StringComparison.OrdinalIgnoreCase))
+            {
+                encoded = (EncodeJpeg(resized, 82), "image/jpeg");
+            }
+            else
+            {
+                var png = EncodePng(resized);
+                encoded = (png, "image/png");
+
+                if (png.Length > MaxImageBytes && !HasAlphaChannel(resized))
+                {
+                    var jpeg = EncodeJpeg(resized, 82);
+                    if (jpeg.Length < png.Length)
+                    {
+                        encoded = (jpeg, "image/jpeg");
+                    }
+                }
+            }
+
+            // Automatic compression has no original-file fallback: a failed, oversized, or
+            // non-beneficial result aborts the entire import before the LMDB transaction starts.
+            if (encoded.Bytes.Length >= originalBytes.Length)
+            {
+                throw new InvalidDataException(Strings.Get("ImageImportCompressionNotSmaller"));
+            }
+
+            if (encoded.Bytes.Length > MaxImageBytes)
+            {
+                throw new InvalidDataException(Strings.Format("ImageImportCompressedTooLarge", MaxImageBytes / 1024 / 1024));
+            }
+
+            return encoded;
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidDataException(Strings.Get("ImageImportCompressionFailed"), ex);
+        }
+    }
+
+    private static BitmapSource ResizeBitmapSource(BitmapSource source, int maxDimension)
+    {
+        BitmapSource bitmap = source;
+        var longestEdge = Math.Max(source.PixelWidth, source.PixelHeight);
+        if (longestEdge > maxDimension)
+        {
+            var scale = maxDimension / (double)longestEdge;
+            bitmap = new TransformedBitmap(source, new ScaleTransform(scale, scale));
+        }
+
+        if (bitmap.CanFreeze)
+        {
+            bitmap.Freeze();
+        }
+
+        return bitmap;
+    }
+
+    private static bool HasAlphaChannel(BitmapSource source)
+    {
+        var format = source.Format;
+        if (format == PixelFormats.Bgra32 ||
+            format == PixelFormats.Pbgra32 ||
+            format == PixelFormats.Rgba64 ||
+            format == PixelFormats.Prgba64 ||
+            format == PixelFormats.Rgba128Float ||
+            format == PixelFormats.Prgba128Float)
+        {
+            return true;
+        }
+
+        return source.Palette?.Colors.Any(color => color.A < byte.MaxValue) == true;
+    }
+
+    /// <summary>
+    /// Windows clipboard bitmaps frequently expose a 32-bit format with an unused alpha plane
+    /// left at 0. If every pixel is fully transparent but RGB is present, treat alpha as absent
+    /// and force the image opaque before PNG encode.
+    /// </summary>
+    private static BitmapSource NormalizeVacuousAlpha(BitmapSource source)
+    {
+        if (!HasAlphaChannel(source) || source.PixelWidth <= 0 || source.PixelHeight <= 0)
+        {
+            return source;
+        }
+
+        BitmapSource bgra = source.Format == PixelFormats.Bgra32
+            ? source
+            : new FormatConvertedBitmap(source, PixelFormats.Bgra32, null, 0);
+
+        var width = bgra.PixelWidth;
+        var height = bgra.PixelHeight;
+        var stride = width * 4;
+        var pixels = new byte[checked(stride * height)];
+        bgra.CopyPixels(pixels, stride, 0);
+
+        var hasVisibleAlpha = false;
+        var hasRgbContent = false;
+        for (var i = 0; i < pixels.Length; i += 4)
+        {
+            if (pixels[i + 3] != 0)
+            {
+                hasVisibleAlpha = true;
+                break;
+            }
+
+            if (!hasRgbContent &&
+                (pixels[i] != 0 || pixels[i + 1] != 0 || pixels[i + 2] != 0))
+            {
+                hasRgbContent = true;
+            }
+        }
+
+        // Real transparent images keep non-zero alpha on at least some pixels.
+        // All-zero alpha with any RGB is the broken clipboard DIB pattern.
+        if (hasVisibleAlpha || !hasRgbContent)
+        {
+            return source;
+        }
+
+        for (var i = 3; i < pixels.Length; i += 4)
+        {
+            pixels[i] = 255;
+        }
+
+        var fixedBitmap = BitmapSource.Create(
+            width,
+            height,
+            bgra.DpiX,
+            bgra.DpiY,
+            PixelFormats.Bgra32,
+            null,
+            pixels,
+            stride);
+        fixedBitmap.Freeze();
+        return fixedBitmap;
+    }
+
+    private static byte[] EncodePng(BitmapSource source)
+    {
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(source));
+        return EncodeBitmap(encoder);
+    }
+
+    private static byte[] EncodeJpeg(BitmapSource source, int quality)
+    {
+        BitmapSource bitmap = source;
+        if (source.Format != PixelFormats.Bgr24 && source.Format != PixelFormats.Bgr32)
+        {
+            bitmap = new FormatConvertedBitmap(source, PixelFormats.Bgr24, null, 0);
+        }
+
+        var encoder = new JpegBitmapEncoder { QualityLevel = Math.Clamp(quality, 50, 95) };
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        return EncodeBitmap(encoder);
+    }
+
+    private static byte[] EncodeBitmap(BitmapEncoder encoder)
+    {
+        using var stream = new MemoryStream();
+        encoder.Save(stream);
+        return stream.ToArray();
+    }
+
+    private static bool TryReadBitmapInfo(byte[] bytes, out BitmapFrame frame, out int width, out int height)
+    {
+        frame = null!;
+        width = 0;
+        height = 0;
+
+        try
+        {
+            using var stream = new MemoryStream(bytes);
+            var decoder = BitmapDecoder.Create(
+                stream,
+                BitmapCreateOptions.PreservePixelFormat,
+                BitmapCacheOption.OnLoad);
+            frame = decoder.Frames[0];
+            frame.Freeze();
+            width = frame.PixelWidth;
+            height = frame.PixelHeight;
+            return width > 0 && height > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static int DecodePixelWidth(NoteImageAsset asset, double targetPixelWidth)
+    {
+        if (targetPixelWidth <= 0 || asset.Width <= 0)
+        {
+            return 0;
+        }
+
+        var requested = (int)Math.Ceiling(targetPixelWidth);
+        if (requested <= 0 || requested >= asset.Width)
+        {
+            return 0;
+        }
+
+        return Math.Clamp(requested, 32, asset.Width);
+    }
+
+    private static string? MimeFromEncodedBytes(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.StartsWith(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }))
+        {
+            return "image/png";
+        }
+        if (bytes.StartsWith(new byte[] { 0xFF, 0xD8, 0xFF }))
+        {
+            return "image/jpeg";
+        }
+        if (bytes.StartsWith("GIF87a"u8) || bytes.StartsWith("GIF89a"u8))
+        {
+            return "image/gif";
+        }
+        if (bytes.StartsWith("BM"u8))
+        {
+            return "image/bmp";
+        }
+        if (bytes.StartsWith(new byte[] { 0x49, 0x49, 0x2A, 0x00 }) ||
+            bytes.StartsWith(new byte[] { 0x4D, 0x4D, 0x00, 0x2A }))
+        {
+            return "image/tiff";
+        }
+        // RIFF....WEBP
+        if (bytes.Length >= 12 &&
+            bytes.StartsWith("RIFF"u8) &&
+            bytes[8] == (byte)'W' &&
+            bytes[9] == (byte)'E' &&
+            bytes[10] == (byte)'B' &&
+            bytes[11] == (byte)'P')
+        {
+            return "image/webp";
+        }
+
+        return null;
+    }
+
+    private static string NormalizeMime(string mime)
+        => mime is "image/jpeg" or "image/png" or "image/gif" or "image/bmp" or "image/tiff" or "image/webp"
+            ? mime
+            : "image/png";
+
+    private static string ExtensionFromMime(string mime)
+        => mime switch
+        {
+            "image/jpeg" => ".jpg",
+            "image/gif" => ".gif",
+            "image/bmp" => ".bmp",
+            "image/tiff" => ".tif",
+            "image/webp" => ".webp",
+            _ => ".png"
+        };
+
+    private static bool TryValidateIndex(
+        LmdbImageIndex index,
+        out List<NoteImageAsset> images,
+        out HashSet<string> corruptedImageIds,
+        out long totalBytes)
+    {
+        images = new List<NoteImageAsset>();
+        corruptedImageIds = new HashSet<string>(index.CorruptedImageIds, StringComparer.Ordinal);
+        totalBytes = 0;
+        if (index.NextImageNumber is < 1 or > 100_000_000)
+        {
+            return false;
+        }
+
+        var usedIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var asset in index.Assets)
+        {
+            if (!TryValidateAssetMetadata(asset) ||
+                !usedIds.Add(asset.Id))
+            {
+                if (!string.IsNullOrWhiteSpace(asset?.Id))
+                {
+                    corruptedImageIds.Add(asset.Id);
+                }
+                continue;
+            }
+
+            if (asset.ByteLength > MaxTotalImageBytes - totalBytes)
+            {
+                corruptedImageIds.Add(asset.Id);
+                continue;
+            }
+
+            totalBytes += asset.ByteLength;
+            images.Add(asset);
+        }
+
+        return true;
+    }
+
+    private void ReplaceImages(IEnumerable<NoteImageAsset> images)
+    {
+        _images.Clear();
+        foreach (var asset in images)
+        {
+            _images.Add(asset.Id, asset);
+        }
+    }
+
+    private void RemoveImageLocked(string imageId, bool reserveIdUntilRestart)
+    {
+        if (!_images.Remove(imageId, out var asset))
+        {
+            return;
+        }
+
+        _totalImageBytes = Math.Max(0, _totalImageBytes - asset.ByteLength);
+        _verifiedImageIds.Remove(imageId);
+        _corruptedImageIds.Remove(imageId);
+        RemoveCachedBitmapsFor(imageId);
+        if (reserveIdUntilRestart)
+        {
+            _retiredImageIds.Add(imageId);
+        }
+    }
+
+    private static bool TryValidateAssetMetadata(NoteImageAsset asset)
+    {
+        if (asset == null ||
+            !MarkdownImageReferences.IsValidImageId(asset.Id) ||
+            string.IsNullOrWhiteSpace(asset.NoteId) ||
+            asset.Mime != NormalizeMime(asset.Mime) ||
+            asset.Width <= 0 ||
+            asset.Height <= 0 ||
+            Math.Max(asset.Width, asset.Height) > MaxStoredDimension ||
+            asset.ByteLength is <= 0 or > MaxImageBytes ||
+            string.IsNullOrWhiteSpace(asset.Sha256) ||
+            asset.Sha256.Length != 64)
+        {
+            return false;
+        }
+
+        try
+        {
+            var hexBytes = Convert.FromHexString(asset.Sha256);
+            return hexBytes.Length == 32;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryReadImageBytesLocked(NoteImageAsset asset, out byte[] bytes)
+    {
+        bytes = Array.Empty<byte>();
+        if (_corruptedImageIds.Contains(asset.Id))
+        {
+            return false;
+        }
+
+        if (_database == null)
+        {
+            return false;
+        }
+
+        if (!_database.TryReadBlob(asset.Id, out var storedBytes) ||
+            storedBytes.Length != asset.ByteLength)
+        {
+            MarkImageCorruptedLocked(asset.Id);
+            return false;
+        }
+
+        if (!_verifiedImageIds.Contains(asset.Id))
+        {
+            var actualHash = Convert.ToHexString(SHA256.HashData(storedBytes));
+            if (!string.Equals(actualHash, asset.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                MarkImageCorruptedLocked(asset.Id);
+                return false;
+            }
+            _verifiedImageIds.Add(asset.Id);
+        }
+
+        bytes = storedBytes;
+        return true;
+    }
+
+    private void MarkImageCorruptedLocked(string imageId)
+    {
+        _corruptedImageIds.Add(imageId);
+        _verifiedImageIds.Remove(imageId);
+        RemoveCachedBitmapsFor(imageId);
+    }
+
+    private LmdbImageDatabase RequireDatabaseLocked()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_writeDisabled)
+        {
+            throw new InvalidOperationException(Strings.Get("ImageStoreUnavailable"));
+        }
+
+        if (_database != null)
+        {
+            return _database;
+        }
+
+        try
+        {
+            _database = LmdbImageDatabase.Open(FilePath);
+            return _database;
+        }
+        catch (Exception ex)
+        {
+            _database?.Dispose();
+            _database = null;
+            _writeDisabled = true;
+            throw new InvalidOperationException(Strings.Get("ImageStoreUnavailable"), ex);
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _database?.Dispose();
+            _database = null;
+            _images.Clear();
+            ClearBitmapCacheLocked();
+            ClearViewportProtectionLocked();
+            _verifiedImageIds.Clear();
+            _corruptedImageIds.Clear();
+        }
+    }
+
+    private void StoreBitmapCacheLocked(string imageId, BitmapSource bitmap)
+    {
+        RemoveCachedBitmapsFor(imageId);
+        var decodedBytes = EstimateDecodedBytes(bitmap);
+        var node = _bitmapLru.AddLast(imageId);
+        _bitmapCache[imageId] = new CachedBitmap(bitmap, decodedBytes, node);
+        _totalDecodedBitmapBytes += decodedBytes;
+        TrimBitmapCacheLocked();
+    }
+
+    private void TouchBitmapCacheLocked(string imageId)
+    {
+        if (!_bitmapCache.TryGetValue(imageId, out var cached))
+        {
+            return;
+        }
+
+        _bitmapLru.Remove(cached.LruNode);
+        cached.LruNode = _bitmapLru.AddLast(imageId);
+    }
+
+    private void ProtectViewportBitmapLocked(string ownerKey, string imageId)
+    {
+        if (string.IsNullOrWhiteSpace(ownerKey) || string.IsNullOrWhiteSpace(imageId))
+        {
+            return;
+        }
+
+        if (!_viewportProtectedByOwner.TryGetValue(ownerKey, out var set))
+        {
+            set = new HashSet<string>(StringComparer.Ordinal);
+            _viewportProtectedByOwner[ownerKey] = set;
+        }
+
+        if (set.Add(imageId))
+        {
+            _viewportProtectedIds.Add(imageId);
+        }
+    }
+
+    private void RebuildViewportProtectedUnionLocked()
+    {
+        _viewportProtectedIds.Clear();
+        foreach (var set in _viewportProtectedByOwner.Values)
+        {
+            _viewportProtectedIds.UnionWith(set);
+        }
+    }
+
+    private void ClearViewportProtectionLocked()
+    {
+        _viewportProtectedByOwner.Clear();
+        _viewportProtectedIds.Clear();
+    }
+
+    private void TrimBitmapCacheLocked()
+    {
+        while (_bitmapCache.Count > MaxBitmapCacheEntries ||
+               _totalDecodedBitmapBytes > MaxDecodedBitmapBytes)
+        {
+            // Evict oldest non-visible entry. On-screen (protected) bitmaps ignore the caps.
+            var victim = _bitmapLru.First;
+            while (victim != null && _viewportProtectedIds.Contains(victim.Value))
+            {
+                victim = victim.Next;
+            }
+
+            if (victim == null)
+            {
+                return;
+            }
+
+            RemoveCachedBitmapsFor(victim.Value);
+        }
+    }
+
+    private void ClearBitmapCacheLocked()
+    {
+        _bitmapCache.Clear();
+        _bitmapLru.Clear();
+        _totalDecodedBitmapBytes = 0;
+    }
+
+    private void RemoveCachedBitmapsFor(string imageId)
+    {
+        if (!_bitmapCache.Remove(imageId, out var cached))
+        {
+            return;
+        }
+
+        _bitmapLru.Remove(cached.LruNode);
+        _totalDecodedBitmapBytes = Math.Max(0, _totalDecodedBitmapBytes - cached.DecodedBytes);
+    }
+
+    private static long EstimateDecodedBytes(BitmapSource bitmap)
+    {
+        // Frozen BitmapImage is typically Bgra32 after OnLoad; 4 bytes/px is a safe upper bound
+        // for budget accounting even when the source format is lower.
+        var width = Math.Max(0, bitmap.PixelWidth);
+        var height = Math.Max(0, bitmap.PixelHeight);
+        return (long)width * height * 4;
+    }
+
+    private sealed class CachedBitmap(
+        BitmapSource bitmap,
+        long decodedBytes,
+        LinkedListNode<string> lruNode)
+    {
+        public BitmapSource Bitmap { get; } = bitmap;
+        public long DecodedBytes { get; } = decodedBytes;
+        public LinkedListNode<string> LruNode { get; set; } = lruNode;
+    }
+
+    private readonly record struct PreparedImage(
+        byte[] Bytes,
+        string Mime,
+        string OriginalName,
+        int Width,
+        int Height);
+}
+
+public sealed class NoteImageAsset
+{
+    public string Id { get; set; } = "";
+    public string NoteId { get; set; } = "";
+    public string Mime { get; set; } = "image/png";
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public string Sha256 { get; set; } = "";
+    public int ByteLength { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public string? OriginalName { get; set; }
+}
