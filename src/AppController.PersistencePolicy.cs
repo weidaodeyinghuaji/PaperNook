@@ -6,6 +6,31 @@ namespace PaperTodo;
 public sealed partial class AppController
 {
     private DispatcherTimer? _stateBackupTimer;
+    private bool _preparingNormalExit;
+
+    internal bool TryPrepareNormalExit(Func<MessageBoxResult>? choose = null, Action? reportSaveFailure = null)
+    {
+        if (!IsRunning || _preparingNormalExit) return false;
+        _preparingNormalExit = true;
+        try
+        {
+            // Resolve UI drafts while commands are still allowed. A failed save must keep
+            // the running lifecycle and its retry timers intact; shutdown is not rollback.
+            foreach (var window in _plannerWindows.ToArray())
+                if (!window.TryPrepareExit(choose)) return false;
+            if (!IsRunning) return false;
+            CommitSettingsExternalMarkdownEditor(saveImmediately: false);
+            foreach (var window in _windows.Values.ToArray()) window.CommitPendingEditsForSave();
+            if (TrySaveNow(sync: true, notifyFailure: false)) return true;
+            // Ignoring routine autosave warnings must not hide a cancelled exit.
+            if (reportSaveFailure != null) reportSaveFailure();
+            else
+                MessageBox.Show(Strings.Get("NormalExitSaveFailure"), Strings.Get("SaveFailureTitle"),
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
+        }
+        finally { _preparingNormalExit = false; }
+    }
 
     internal void StartStateBackupPolicy()
     {

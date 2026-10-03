@@ -29,7 +29,11 @@ public sealed record PaperBodyTheme(
     string AccentColor,
     string BorderColor,
     string FontFamily,
-    double FontScale);
+    double FontScale)
+{
+    // Additive property keeps the existing constructor compatible with compiled plugins.
+    public bool AnimationsEnabled { get; init; } = true;
+}
 
 public enum PaperCapsuleComponentKind
 {

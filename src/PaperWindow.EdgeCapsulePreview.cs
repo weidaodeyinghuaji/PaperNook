@@ -294,7 +294,9 @@ public sealed partial class PaperWindow
             return true;
         }
 
-        if (descriptor.Kind == PaperBodyPluginKind.Native && !_isShellBuilt)
+        if ((descriptor.Kind == PaperBodyPluginKind.Native ||
+             (descriptor.Kind == PaperBodyPluginKind.BuiltIn && descriptor.NativePluginType != null)) &&
+            !_isShellBuilt)
         {
             // The body session has not run yet, so PreferredMiniViewSize is intentionally unknown.
             // This initial envelope covers both protocol defaults (320x220 dedicated mini and

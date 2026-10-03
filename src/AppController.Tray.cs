@@ -527,6 +527,7 @@ public sealed partial class AppController
         menu.Items.Add(TraySeparator());
 
         menu.Items.Add(TrayPaperToolbar(menu));
+        menu.Items.Add(TrayItem(menu, Strings.Get("PlannerOpen"), OpenPlanner));
 
         if (State.Papers.Count > 0)
         {
@@ -695,6 +696,7 @@ public sealed partial class AppController
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         KeyboardNavigation.SetTabNavigation(grid, KeyboardNavigationMode.Cycle);
 
         var visibilityTip = Strings.Get(anyShown ? "TrayHideAll" : "TrayShowAll");
@@ -726,15 +728,22 @@ public sealed partial class AppController
             CreateTrayAddIcon("✎"),
             Strings.Get("TrayNewNote"),
             () => CreatePaper(PaperTypes.Note, show: true));
+        var codexMeterButton = TrayToolbarAction(
+            menu,
+            CreateTrayAddIcon("◔"),
+            Strings.Get("CodexMeterOpen"),
+            OpenOrCreateCodexMeterPaper);
 
         Grid.SetColumn(visibilityButton, 0);
         Grid.SetColumn(label, 1);
         Grid.SetColumn(newTodoButton, 2);
         Grid.SetColumn(newNoteButton, 3);
+        Grid.SetColumn(codexMeterButton, 4);
         grid.Children.Add(visibilityButton);
         grid.Children.Add(label);
         grid.Children.Add(newTodoButton);
         grid.Children.Add(newNoteButton);
+        grid.Children.Add(codexMeterButton);
 
         item.Header = grid;
         item.Click += (_, e) => e.Handled = true;

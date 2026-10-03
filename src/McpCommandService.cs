@@ -42,6 +42,8 @@ internal sealed class McpCommandService
             return method switch
             {
                 "list_papers" => ListPapers(parameters),
+                "list_tasks" => ListPlannerTasks(),
+                "propose_schedule" => ProposeSchedule(parameters),
                 "get_paper" => GetPaper(parameters),
                 "create_todo_paper" => CreateTodoPaper(parameters),
                 "create_note" => CreateNote(parameters),
@@ -91,6 +93,53 @@ internal sealed class McpCommandService
             })
             .ToArray();
         return new { papers };
+    }
+
+    private object ListPlannerTasks() => new
+    {
+        tasks = _commands.ListPlannerTasks().Select(t => new
+        {
+            paper_id = t.Paper.Id, todo_id = t.Item.Id,
+            list_id = TaskPlanningRules.ResolveList(_controller.State, t).Id,
+            list_name = TaskPlanningRules.ResolveList(_controller.State, t).Title,
+            folder = TaskPlanningRules.ResolveList(_controller.State, t).PlannerFolder,
+            inbox = TaskPlanningRules.ResolveList(_controller.State, t).PlannerInbox, text = t.Item.Text,
+            done = t.Item.Done, version = t.Version, planned_date = t.Planning.PlannedDate,
+            due_date = t.Planning.DueDate, priority = t.Planning.Priority,
+            duration_minutes = t.Planning.DurationMinutes, tags = t.Planning.Tags,
+            start = t.Planning.ScheduledStart, end = t.Planning.ScheduledEnd, locked = t.Planning.Locked
+        }).ToArray()
+    };
+
+    private object ProposeSchedule(JsonElement parameters)
+    {
+        if (!_controller.State.McpAllowScheduleProposals)
+            throw new McpApiException("schedule_proposals_disabled", Strings.Get("PlannerProposalPermissionError"));
+        if (!parameters.TryGetProperty("blocks", out var blocks) || blocks.ValueKind != JsonValueKind.Array ||
+            blocks.GetArrayLength() is < 1 or > 100)
+            throw new McpApiException("invalid_params", "Provide 1–100 blocks.");
+        var proposals = new List<ScheduleProposal>();
+        foreach (var block in blocks.EnumerateArray())
+        {
+            _ = RequireObject(block, "block");
+            proposals.Add(new(RequiredString(block, "paper_id", 64), RequiredString(block, "todo_id", 64),
+                RequiredString(block, "expected_version", 64), ParseScheduleTime(block, "start"),
+                ParseScheduleTime(block, "end")));
+        }
+        var draft = _commands.PreviewPlannerSchedule(proposals);
+        _controller.QueuePlannerScheduleDraft(draft);
+        return new { status = "pending_local_confirmation", count = draft.Changes.Count,
+            message = "No task changed. The user must confirm the proposal inside PaperNook." };
+    }
+
+    private static DateTimeOffset ParseScheduleTime(JsonElement block, string name)
+    {
+        var text = RequiredString(block, name, 80);
+        if (!text.Contains('T') || !System.Text.RegularExpressions.Regex.IsMatch(text, @"(?:Z|[+-]\d{2}:\d{2})$",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant) ||
+            !DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var value))
+            throw new McpApiException("invalid_params", name + " must be ISO 8601 with an explicit UTC offset.");
+        return value;
     }
 
     private object GetPaper(JsonElement parameters)

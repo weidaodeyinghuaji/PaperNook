@@ -74,13 +74,17 @@ public partial class App : Application
         }
 
         var startupCommand = StartupCommand.Parse(e.Args);
+        var packageSmokeTest = e.Args.Contains("--package-smoke-test", StringComparer.Ordinal);
         ApplyStartupCulturePreference(UiLanguages.LoadPersistedPreference());
 
         // Register global unhandled exception handlers
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
 
-        _singleInstance = new SingleInstanceHelper("PaperNook-SingleInstance-Mutex", "PaperNook-SingleInstance-Activate");
+        var instanceSuffix = packageSmokeTest ? $"-PackageSmoke-{Environment.ProcessId}" : "";
+        _singleInstance = new SingleInstanceHelper(
+            $"PaperNook-SingleInstance-Mutex{instanceSuffix}",
+            $"PaperNook-SingleInstance-Activate{instanceSuffix}");
         if (!_singleInstance.TryAcquire())
         {
             _singleInstance.SignalPrimaryInstance(e.Args);
@@ -131,11 +135,13 @@ public partial class App : Application
         }
 
         SessionEnding += (s, args) => _controller?.ExitForSystemShutdown();
-        var handlesInitialVisibility = startupCommand.Kind is
+        var handlesInitialVisibility = packageSmokeTest || startupCommand.Kind is
             StartupCommandKind.Hide or StartupCommandKind.Toggle;
         await _controller.StartAsync(
             createDefaultPaper: !startupCommand.CreatesPaper,
-            initialVisibilityCommand: handlesInitialVisibility
+            initialVisibilityCommand: packageSmokeTest
+                ? StartupCommandKind.Hide
+                : handlesInitialVisibility
                 ? startupCommand.Kind
                 : StartupCommandKind.None);
         if (!_controller.IsRunning)
@@ -152,6 +158,10 @@ public partial class App : Application
         CompleteSingleInstanceStartup();
         _controller.MarkPluginStartupHealthy();
         MarkUpdateLaunchHealthy();
+        if (packageSmokeTest)
+        {
+            _controller.Exit();
+        }
     }
 
     private void MarkUpdateLaunchStarted()

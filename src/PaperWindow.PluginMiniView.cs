@@ -52,7 +52,9 @@ public sealed partial class PaperWindow
     internal EdgeCapsulePreviewDescriptor DescribePluginEdgeCapsulePreview(
         EdgeCapsulePreviewContext context)
     {
-        if (_bodyDescriptor?.Kind == PaperBodyPluginKind.Native &&
+        if (_bodyDescriptor is { } nativeDescriptor &&
+            (nativeDescriptor.Kind == PaperBodyPluginKind.Native ||
+             (nativeDescriptor.Kind == PaperBodyPluginKind.BuiltIn && nativeDescriptor.NativePluginType != null)) &&
             _paperBodyHost.Current is IPaperMiniViewProvider nativeProvider)
         {
             var preferred = ReadPreferredMiniSize(

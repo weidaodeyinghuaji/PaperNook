@@ -453,6 +453,8 @@ public sealed class StateStore
             RemoveNullEntriesInPlace(paper.Items);
 
             paper.Content ??= "";
+            if (paper.PlannerFolder != null)
+                paper.PlannerFolder = paper.PlannerFolder.Trim()[..Math.Min(paper.PlannerFolder.Trim().Length, 80)];
             paper.X = NormalizeCoordinate(paper.X, 120);
             paper.Y = NormalizeCoordinate(paper.Y, 120);
             if (!IsFinite(paper.TextZoom))
@@ -491,6 +493,7 @@ public sealed class StateStore
             foreach (var item in paper.Items)
             {
                 item.Text ??= "";
+                if (item.Planning != null) item.Planning = TaskPlanningRules.Normalize(item.Planning);
             }
         }
     }
@@ -534,6 +537,11 @@ public sealed class StateStore
 
     private static void NormalizeGlobalState(AppState state)
     {
+        state.PlannerPinnedViews ??= new();
+        state.PlannerPinnedViews = state.PlannerPinnedViews.Where(p => p != null &&
+            p.View is "today" or "tomorrow" or "week" or "all" or "inbox" or "completed" or "agenda" or "list")
+            .DistinctBy(p => (p.View, p.PaperId)).Take(20)
+            .Select(p => p with { Layout = PlannerPinnedLayout.Normalize(p.Layout) }).ToList();
         if (state.Theme is not ("system" or "light" or "dark"))
         {
             state.Theme = "system";
@@ -734,6 +742,7 @@ public sealed class StateStore
 
                 item.Order = i;
                 item.Text ??= "";
+                if (item.Planning != null) item.Planning = TaskPlanningRules.Normalize(item.Planning);
                 if (item.Done)
                 {
                     item.ReminderAt = null;

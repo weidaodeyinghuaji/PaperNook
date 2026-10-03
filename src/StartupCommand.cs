@@ -8,7 +8,8 @@ public enum StartupCommandKind
     Toggle,
     NewTodo,
     NewNote,
-    Exit
+    Exit,
+    Planner
 }
 
 public sealed class StartupCommand
@@ -42,6 +43,7 @@ public sealed class StartupCommand
             "toggle" => StartupCommandKind.Toggle,
             "new-todo" or "todo" => StartupCommandKind.NewTodo,
             "new-note" or "note" or "paper" => StartupCommandKind.NewNote,
+            "planner" or "schedule" => StartupCommandKind.Planner,
             "exit" or "quit" => StartupCommandKind.Exit,
             _ => StartupCommandKind.None
         });

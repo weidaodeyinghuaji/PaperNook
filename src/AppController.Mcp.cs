@@ -55,6 +55,13 @@ public sealed partial class AppController
         RefreshSettingsRegions("labs.mcp");
     }
 
+    private void ToggleMcpScheduleProposals()
+    {
+        State.McpAllowScheduleProposals = !State.McpAllowScheduleProposals;
+        SaveNow();
+        RefreshSettingsRegions("labs.mcp");
+    }
+
     private void ToggleMcpDeletes()
     {
         State.McpAllowDeletes = !State.McpAllowDeletes;
@@ -239,10 +246,12 @@ public sealed partial class AppController
             "- Preserve the user's existing paper structure unless the user explicitly asks to reorganize it.",
             "- Treat permission errors as PaperNook policy, not as transport failures; do not retry a rejected mutation with a more destructive tool.",
             "- For reminders, use an explicit future ISO 8601 time with UTC offset.",
+            "- For planning, call `list_tasks` and use its current version tokens. Respect fixed schedule locks and deadline dates.",
+            "- `propose_schedule` only opens a local confirmation preview. Never claim tasks were changed until the user confirms inside PaperNook.",
             "",
             "## Available tools",
             "`list_papers`, `get_paper`, `create_todo_paper`, `create_note`, `add_todos`,",
-            "`update_todo`, `set_todo_reminder`, `write_note`, `delete_paper`, `delete_todo`.",
+            "`update_todo`, `set_todo_reminder`, `write_note`, `delete_paper`, `delete_todo`, `list_tasks`, `propose_schedule`.",
             "",
             "Connection details are intentionally separate. Use PaperNook's “Copy JSON config” button to configure the MCP client.");
     }

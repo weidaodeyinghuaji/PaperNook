@@ -25,4 +25,5 @@ plugins/data/
 
 # Local drafts
 *.draft.md
+tests/**/artifacts/
 

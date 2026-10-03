@@ -15,6 +15,17 @@ internal sealed class McpTools
         _client = client;
     }
 
+    [McpServerTool(Name = "list_tasks", ReadOnly = true, Destructive = false, OpenWorld = false)]
+    [Description("Read tasks across all lists with planning dates, deadlines, schedule blocks, fixed locks and version tokens. Call before proposing a schedule.")]
+    public Task<JsonElement> ListTasks(CancellationToken cancellationToken = default)
+        => _client.InvokeAsync("list_tasks", new { }, cancellationToken);
+
+    [McpServerTool(Name = "propose_schedule", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Submit 1–100 candidate task intervals for local user preview. Requires full-write permission. Does NOT apply them; only the user can confirm in PaperNook. Use current list_tasks version tokens, explicit ISO 8601 offsets, and preserve locked events.")]
+    public Task<JsonElement> ProposeSchedule(IReadOnlyList<McpScheduleInput> blocks,
+        CancellationToken cancellationToken = default)
+        => _client.InvokeAsync("propose_schedule", new { blocks }, cancellationToken);
+
     [McpServerTool(
         Name = "list_papers",
         ReadOnly = true,
@@ -208,4 +219,13 @@ internal sealed record McpTodoInput
     [JsonPropertyName("reminder_at")]
     [Description("Optional ISO 8601 future reminder date/time with UTC offset. Requires PaperNook full writes.")]
     public string? ReminderAt { get; init; }
+}
+
+internal sealed record McpScheduleInput
+{
+    [JsonPropertyName("paper_id")] public required string PaperId { get; init; }
+    [JsonPropertyName("todo_id")] public required string TodoId { get; init; }
+    [JsonPropertyName("expected_version")] public required string ExpectedVersion { get; init; }
+    [JsonPropertyName("start")] public required string Start { get; init; }
+    [JsonPropertyName("end")] public required string End { get; init; }
 }

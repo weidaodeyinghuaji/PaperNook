@@ -12,6 +12,7 @@ namespace PaperTodo;
 internal static class PaperBodyProviderIds
 {
     public const string Markdown = "builtin.markdown";
+    public const string CodexMeter = "builtin.codex-meter";
 }
 
 internal enum PaperBodyPluginKind
@@ -159,6 +160,14 @@ internal sealed partial class PaperBodyPluginRegistry : IDisposable
         PaperBodyPluginDescriptor descriptor)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (descriptor.Kind == PaperBodyPluginKind.BuiltIn &&
+            descriptor.NativePluginType is { } builtInType)
+        {
+            var builtIn = (IPaperBodyPlugin?)Activator.CreateInstance(builtInType)
+                ?? throw new InvalidOperationException(
+                    $"Could not create built-in body provider {builtInType.FullName}.");
+            return new PaperBodyNativePluginActivation(builtIn, descriptor);
+        }
         if (descriptor.Kind != PaperBodyPluginKind.Native ||
             descriptor.Manifest == null)
         {
@@ -218,6 +227,23 @@ internal sealed partial class PaperBodyPluginRegistry : IDisposable
             Environment.ProcessPath ?? AppContext.BaseDirectory,
             "builtin");
 
+        var codexManifest = CodexMeterManifest();
+        _descriptors[PaperBodyProviderIds.CodexMeter] = new PaperBodyPluginDescriptor(
+            PaperBodyProviderIds.CodexMeter,
+            Strings.Get("CodexMeterProviderName"),
+            Strings.Get("CodexMeterProviderDescription"),
+            typeof(CodexMeterPaperPlugin).Assembly.GetName().Version ?? new Version(1, 0),
+            SupportedPluginApiVersion,
+            1,
+            PaperBodyPluginKind.BuiltIn,
+            PaperBodyCapabilities.None,
+            PaperTodoPermissionNames.None,
+            AppContext.BaseDirectory,
+            Environment.ProcessPath ?? AppContext.BaseDirectory,
+            "builtin-codex-meter",
+            typeof(CodexMeterPaperPlugin),
+            codexManifest);
+
         var pluginDirectories = Directory.Exists(PluginRoot)
             ? EnumeratePluginDirectories()
             : Array.Empty<string>();
@@ -253,6 +279,97 @@ internal sealed partial class PaperBodyPluginRegistry : IDisposable
             }
         }
     }
+
+    private static PaperBodyPluginManifest CodexMeterManifest() => new()
+    {
+        Kind = "builtin",
+        Id = PaperBodyProviderIds.CodexMeter,
+        Name = Strings.Get("CodexMeterProviderName"),
+        Description = Strings.Get("CodexMeterProviderDescription"),
+        Version = "1.0.0",
+        ApiVersion = SupportedPluginApiVersion,
+        StateVersion = 1,
+        MaxPaperInstances = 1,
+        Capabilities = ["runtime"],
+        MiniMaxSize = new PaperBodyPluginMiniSizeManifest { Width = 360, Height = 240 },
+        Settings =
+        [
+            new PaperBodyPluginSettingManifest
+            {
+                Id = "refreshSeconds",
+                Type = "number",
+                Name = Strings.Get("CodexMeterRefreshInterval"),
+                Description = Strings.Get("CodexMeterRefreshIntervalDescription"),
+                Default = JsonSerializer.SerializeToElement(60),
+                Quick = true,
+                Min = 30,
+                Max = 1800,
+                Step = 30,
+                Suffix = Strings.Get("CodexMeterSeconds")
+            },
+            new PaperBodyPluginSettingManifest
+            {
+                Id = "showCost",
+                Type = "boolean",
+                Name = Strings.Get("CodexMeterShowCost"),
+                Description = Strings.Get("CodexMeterShowCostDescription"),
+                Default = JsonSerializer.SerializeToElement(true),
+                Quick = true
+            },
+            new PaperBodyPluginSettingManifest
+            {
+                Id = "accountScope",
+                Type = "select",
+                Name = Strings.Get("CodexMeterAccountScope"),
+                Description = Strings.Get("CodexMeterAccountScopeDescription"),
+                Default = JsonSerializer.SerializeToElement("current"),
+                Quick = true,
+                Options =
+                [
+                    new PaperBodyPluginSettingOptionManifest
+                    {
+                        Value = "current",
+                        Name = Strings.Get("CodexMeterCurrentAccount")
+                    },
+                    new PaperBodyPluginSettingOptionManifest
+                    {
+                        Value = "all",
+                        Name = Strings.Get("CodexMeterAllAccounts")
+                    }
+                ]
+            },
+            new PaperBodyPluginSettingManifest
+            {
+                Id = "currency",
+                Type = "select",
+                Name = Strings.Get("CodexMeterCurrency"),
+                Description = Strings.Get("CodexMeterCurrencyDescription"),
+                Default = JsonSerializer.SerializeToElement("USD"),
+                Quick = true,
+                Options =
+                [
+                    new PaperBodyPluginSettingOptionManifest { Value = "USD", Name = Strings.Get("CodexMeterCurrencyUsd") },
+                    new PaperBodyPluginSettingOptionManifest { Value = "CNY", Name = Strings.Get("CodexMeterCurrencyCny") }
+                ]
+            },
+            new PaperBodyPluginSettingManifest
+            {
+                Id = "createOnStartup",
+                Type = "boolean",
+                Name = Strings.Get("CodexMeterCreateOnStartup"),
+                Description = Strings.Get("CodexMeterCreateOnStartupDescription"),
+                Default = JsonSerializer.SerializeToElement(false),
+                Quick = true
+            }
+        ],
+        StartupPaper = new PaperBodyPluginStartupManifest
+        {
+            EnabledSetting = "createOnStartup",
+            InstanceKey = "main",
+            Presentation = "expanded",
+            Title = Strings.Get("CodexMeterPaperTitle")
+        }
+    };
 
     internal void RecordActivation(PaperBodyPluginDescriptor descriptor)
     {
@@ -595,6 +712,7 @@ internal sealed partial class PaperBodyPluginRegistry : IDisposable
                 "Plugin id must contain 3-120 ASCII letters, digits, '.', '_' or '-'.");
         }
         if (string.Equals(id.Trim(), PaperBodyProviderIds.Markdown, StringComparison.Ordinal) ||
+            string.Equals(id.Trim(), PaperBodyProviderIds.CodexMeter, StringComparison.Ordinal) ||
             string.Equals(id.Trim(), "data", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidDataException("The plugin id is reserved by PaperNook.");

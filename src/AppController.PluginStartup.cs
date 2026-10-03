@@ -101,6 +101,14 @@ public sealed partial class AppController
                         startup.Title,
                         State.MaxTitleLength);
                 }
+                if (string.Equals(
+                        descriptor.Id,
+                        PaperBodyProviderIds.CodexMeter,
+                        StringComparison.Ordinal))
+                {
+                    paper.Width = CodexMeterDefaultWidth;
+                    paper.Height = CodexMeterDefaultHeight;
+                }
                 changed = true;
             }
 

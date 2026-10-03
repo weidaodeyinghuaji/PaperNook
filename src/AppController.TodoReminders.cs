@@ -153,7 +153,9 @@ public sealed partial class AppController
         ProcessDueTodoReminders(now);
     }
 
-    private void ProcessDueTodoReminders(DateTimeOffset now)
+    internal void ProcessDueTodoReminders(DateTimeOffset now,
+        Func<PaperData, PaperItem, bool>? showTarget = null,
+        Func<IReadOnlyList<(PaperData Paper, PaperItem Item)>, bool>? showBalloon = null)
     {
         if (IsExiting || !State.ExperimentalTodoReminders)
         {
@@ -176,11 +178,12 @@ public sealed partial class AppController
             return;
         }
 
-        var surfaced = false;
+        var targetSurfaced = false;
+        var balloonSurfaced = false;
         try
         {
-            OpenTodoReminderTarget(due[0].Paper, due[0].Item);
-            surfaced = true;
+            if (showTarget != null) targetSurfaced = showTarget(due[0].Paper, due[0].Item);
+            else { OpenTodoReminderTarget(due[0].Paper, due[0].Item); targetSurfaced = true; }
         }
         catch
         {
@@ -188,14 +191,14 @@ public sealed partial class AppController
         }
         try
         {
-            surfaced |= ShowTodoReminderBalloon(due);
+            balloonSurfaced = showBalloon?.Invoke(due) ?? ShowTodoReminderBalloon(due);
         }
         catch
         {
             // Keep the reminder pending when neither delivery path is available.
         }
 
-        if (!surfaced)
+        if (!targetSurfaced && !balloonSurfaced)
         {
             ScheduleTodoReminderRetry();
             return;
@@ -205,7 +208,10 @@ public sealed partial class AppController
         // sound must never keep a successfully surfaced reminder pending.
         PlayTodoReminderSound();
 
-        foreach (var (paper, item) in due)
+        // The target window only surfaces the first item. Without a tray summary,
+        // do not consume other reminders that the user has not been shown.
+        var delivered = balloonSurfaced ? due : due.Take(1).ToList();
+        foreach (var (paper, item) in delivered)
         {
             item.ReminderTriggered = true;
             if (item.ReminderAt is { } reminderAt &&
@@ -215,7 +221,7 @@ public sealed partial class AppController
             }
         }
 
-        foreach (var paperGroup in due.GroupBy(
+        foreach (var paperGroup in delivered.GroupBy(
                      entry => entry.Paper.Id,
                      StringComparer.Ordinal))
         {
@@ -227,7 +233,8 @@ public sealed partial class AppController
         }
 
         SaveNow();
-        RefreshTodoReminderSchedule();
+        if (delivered.Count < due.Count) ScheduleTodoReminderRetry();
+        else RefreshTodoReminderSchedule();
     }
 
     private void OpenTodoReminderTarget(

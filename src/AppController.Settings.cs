@@ -88,6 +88,7 @@ public sealed partial class AppController
             window.UpdateTheme();
         }
         foreach (var m in _masterCapsules.Values) m.UpdateTheme();
+        RefreshPlannerAppearance();
 
         RebuildTrayMenu();
         RefreshSettingsWindowContent();
@@ -1755,6 +1756,9 @@ public sealed partial class AppController
             blankWrites,
             "TipLabsMcpBlankWrites"));
         content.Children.Add(WrapWithHint(
+            SettingsToggle(Strings.Get("LabsMcpScheduleProposals"), State.McpAllowScheduleProposals,
+                ToggleMcpScheduleProposals), "TipLabsMcpScheduleProposals"));
+        content.Children.Add(WrapWithHint(
             SettingsToggle(
                 Strings.Get("LabsMcpFullWrites"),
                 State.McpAllowFullWrites,
@@ -1913,6 +1917,7 @@ public sealed partial class AppController
         State.McpEnabled = false;
         State.McpAllowBlankWrites = false;
         State.McpAllowFullWrites = false;
+        State.McpAllowScheduleProposals = false;
         State.McpAllowDeletes = false;
         State.ExperimentalCapsuleMagnetism = false;
         State.ExperimentalCapsuleMagnetScreenEdges = true;
@@ -2854,6 +2859,10 @@ public sealed partial class AppController
                 window.SettleAnimationsForDisabledSetting();
             }
             ArrangeDeepCapsules(animate: false);
+        }
+        foreach (var window in _windows.Values)
+        {
+            window.RefreshPluginMotionPreference();
         }
         SaveNow();
     }

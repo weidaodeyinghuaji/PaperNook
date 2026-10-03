@@ -50,6 +50,7 @@ PaperNook.exe
         ├─ NoteImageStore (LMDB)
         ├─ PaperBodyPluginRegistry / PaperBodyPluginDataStore
         ├─ PaperCommandService
+        ├─ PlannerWindow / pinned query windows (AppController.Planner)
         ├─ plugin Runtime[providerId] → logical Paper instances / Global Top Bar
         ├─ paper Top Bar session registry
         ├─ PaperWindow[paperId]
@@ -74,6 +75,7 @@ PaperNook.exe
 | 图片资产 | `NoteImageStore` | LMDB 生命周期、串行访问、图片编号、缓存和回收 |
 | 插件状态 | `PaperBodyPluginDataStore` | provider settings、provider Runtime state 与 per-paper frontend state 的独立保存/恢复 |
 | 外部 Paper/Todo/Note 命令 | `PaperCommandService` | 插件/MCP 共用的验证、mutation、同步提交/回滚和事件发布 |
+| 清单与日程查询窗口 | `PlannerWindow` / `AppController.Planner` | 可选计划台与置顶查询视图；由 mutation stamp 通知刷新，不保存任务副本；视图配置存于核心状态 |
 | 单纸片 UI | `PaperWindow` | paper WPF shell、普通交互、provider 选择、子系统适配 |
 | paper-body session | `PaperBodyHost` | 当前 `IPaperBodySession` 的 attach / invoke / commit / dispose |
 | plugin Runtime | `AppController.PluginRuntime` | 每 provider 最多一个后端 Runtime；0→1 张实体插件 Paper 时启动、1→0 时释放，按 `paperId` 管理逻辑实例、后端 state、长期 presentation、Global Top Bar/Shortcuts、Todo actions、Top Bar labels 与 Workspace |
@@ -118,6 +120,8 @@ Web 插件使用 WebView2；Native 插件可以自行创建线程、Worker、子
 
 Native 与 Web 使用同一生命周期语义：Native Runtime 是一个长期 C# 对象；Web Runtime 是一个隐藏 WebView/JS 页面。实现载体不同，但 `Settings`、provider `State`、`Papers`、Workspace、Global Top Bar/Shortcuts 和失败重启边界保持一致。
 
+`builtin.codex-meter` 是随宿主编译的原生 provider：只有至少一张 Codex 状态纸片存在时才创建唯一 Runtime。完整统计按原有节奏增量读取本机 `~/.codex/sessions/**/*.jsonl`；独立的本地文件事件监视器只读取变化会话的尾部并快速发布思考 / 工具 / 回答 / 空闲状态，不等待额度 RPC。明确的阻塞式 `request_user_input` 调用显示等待确认；异步提问不据此推断等待。已结束事件保持空闲，过期且未见结束的活动显示状态待确认，不用动画伪造检测结果。官方额度仍按需通过 `codex app-server` stdio JSON-RPC 读取；不引入 Node.js、localhost 端口、第二托盘或第二更新器。`app-server` 是可释放的数据源子进程，不拥有 PaperNook 状态或 UI authority。
+
 Runtime 的 provider `State` 与 Body/Mini 的 per-paper frontend state 分开保存。Runtime 可以在一份后端 JSON 中按 `paperId` 保存自己的业务实例；Body/Mini 的 `StateJson` 只保存前端/纸片 UI 状态。这样后台和前端不会争抢同一个持久化 writer。
 
 当 provider 声明 Runtime 时，**长期 Paper presentation 由 Runtime 唯一负责**：标题、Header、胶囊通过 `Papers` 按 `paperId` 发布。Body/Mini 负责可见 UI，并通过 `Runtime.Post(...)` 发送用户操作；Runtime 可以通过 `Papers.PostToBody(...)` 向当前存在的 Body 前端推送消息。2.1 的 Todo actions 与 Top Bar labels 同样属于 Runtime 生命周期内的易失宿主 presentation。宿主只保证薄路由和明确失败，不提供业务消息总线、ACK、exactly-once、自动 retry 或状态冲突合并。
@@ -144,6 +148,12 @@ PaperTodo 不提供插件热重载入口。插件 manifest、DLL、Web body/mini
 - Todo actions 与 Top Bar labels 是 2.1 的 Runtime contribution，随 Runtime/目标对象生命周期撤销，不进入长期业务持久化。
 
 ## 4. 状态与持久化架构
+
+Todo 的可选 `PaperItem.Planning` 是不可变的 `TaskPlanningData`：计划日期和截止日期保持 DateOnly，日程区间保持明确 offset；优先级、时长、标签、固定状态与分类 `ListId` 随核心数据保存，旧项允许 null。分类指向 Todo paper，但不改变源 `PaperData.Items` ownership；目标清单被删除后查询回退到源纸。`AppState.PlannerPinnedViews` 仅存查询配置和可选窗口位置/大小/显示器/密度，按 View/PaperId 去重；旧配置没有布局时仍可恢复，断开的显示器通过既有工作区 helper 将窗口救回可见范围，不存另一套任务。
+
+计划台写入使用 `PaperCommandService.Planner`，复用同步 commit/rollback、原纸片 undo、UI reconcile 与事件边界，手动和 AI 日程共用截止日期校验。MCP `list_tasks` 提供任务内容/完成/Planning 的版本摘要；`propose_schedule` 由独立、默认关闭的 `McpAllowScheduleProposals` 授权，只排队一个本地确认预览，既不依赖完整写入，也不授予直接改写或删除权限。草稿仅在内存中；用户可以选择部分建议。确认时对选中项重新解析 task identity、版本、锁定和与未选中任务的冲突，批量保存失败恢复所有受影响纸片；本次运行内的排程撤销拒绝覆盖较新的 Planning 修改。现有插件快照合同不扩展 Planning 字段。
+
+每次计划台刷新创建短期 `PlannerTaskQuery` 读投影，共享同一组源 task references 和分类索引；投影不缓存业务写入。侧栏只在结构变化时重建，行复用按源对象、内容、Planning、分类和密度核对；主题变化主动失效。长列表通过 WPF recycling virtualization 仅创建可见行，宽七天视图按天独立滚动，滚动与完成仍指向原任务。窗口内显示缓存不写入核心状态；置顶几何写入复用 `MarkDirty` 的版本化保存与退出 flush。
 
 ### 4.1 三个数据域
 
@@ -178,6 +188,7 @@ Edge 展开记忆保留原有窗口 DIP 字段，并用可选 `DeepCapsuleExpand
 `StateStore` 的方向是保守恢复与版本化写入：主文件失败后可从 backup 恢复；需要保护失败源时先保留证据再允许正常保存覆盖。保存阶段只修复序列化无效值，不重新解释业务不变量。
 
 全局 crash boundary 不执行普通“最后强行保存”。正常 durability 由常规保存、同步退出保存和 backup 提供。
+正常退出先在 Running 生命周期内处理计划台未保存表单与未提交的快速添加、提交纸片编辑并同步保存；任一取消或保存失败都不进入 Exiting，保留窗口、内存状态与保存重试。Windows 会话结束和 crash boundary 不使用交互式退出确认。
 
 ### 4.3 图片资产
 
@@ -190,6 +201,8 @@ Markdown 中的 Note 图片只通过 PaperTodo 内部 `i:` asset URI 引用宿�
 ### 4.4 插件状态
 
 插件 settings 与 per-paper state 由 `PaperBodyPluginDataStore` 独立保存，不塞回 `data.json`。插件数据读失败时保留原始问题源，并通过受控 recovery 路径继续；插件数据故障不应把核心 Paper 数据变成不可加载。
+
+Codex 状态纸片的设置与小型 Runtime 状态沿用 `plugins/data/*.json`，因此进入既有备份域；可重建的扫描索引和额度回退写入 `Cache/CodexMeter/accounts/<account-hash>/`，不进入备份。认证 token 和会话正文不持久化，账号只以哈希与脱敏显示值参与隔离。
 
 ## 5. Paper 与 paper-body 插件
 

@@ -83,6 +83,8 @@ Decisions 的核心问题是：**“为什么今天会这样设计，以及哪�
 
 **Status:** Accepted
 
+可选的跨纸片查询计划台现已按明确产品决策扩展，见 D-045；原纸片的数据 ownership 不变。
+
 ### Decision
 
 PaperTodo 当前的主要交互单元仍是一张可独立存在、独立显示和独立交互的桌面纸片。Todo、Markdown/Note、插件 body、胶囊等能力以 paper 为自然组合边界；应用级能力由 controller 协调，但不会在没有新产品决策的情况下自动把所有 paper 行为收束成一个中心主界面。
@@ -1473,3 +1475,35 @@ V1.1 只信任 Authenticode 链有效、publisher subject 与 SPKI pin 匹配，
 只有连续两次未正常结束且最后阶段为 `DiscoveringPlugins` 或 `ActivatingPlugin` 才自动安全启动；`Running` 中断清零插件归因。隔离由 plugin id + fingerprint 绑定，插件更新后允许重新评估，内置 Markdown 永远启用。
 
 拒绝任意异常后永久删除插件、禁用内置 Markdown、热卸载已载入 Native assembly。证据：`PluginStartupHealthStore`、`PluginPolicyStore`、registry policy gates 与 crash checks。
+
+## D-043 Codex Meter 采用内置原生 provider，不捆绑独立应用或 Node 服务
+
+**Status:** Accepted
+
+Codex Meter 的核心能力迁移为随 PaperNook 编译的 C# provider `builtin.codex-meter`。同一 provider 最多一个 Runtime，只在存在真实 Codex 状态纸片时运行；Body、胶囊与 Edge Mini 继续由 PaperNook 的主题和 surface authority 呈现。会话统计增量读取本机 JSONL，官方额度按需通过 `codex app-server` stdio RPC 获取，账号只用哈希隔离，认证 token、环境变量和会话正文不写入状态或日志。会话写操作只提供继续、可恢复回收和无覆盖恢复；回收前复制并校验 JSONL，V1.1 不提供永久删除。
+
+拒绝捆绑 `CodexMeter.exe`、常驻 Node/localhost 服务、第二托盘和第二更新器。可重建索引、额度回退与 ECB 汇率属于 `Cache/CodexMeter`；额度周期与可恢复会话 manifest 属于耐久插件/数据域并进入既有备份边界；旧 `.codex-meter` 缓存仅只读导入，源数据不修改。证据：`src/CodexMeter/`、`src/AppController.CodexMeter.cs`、`tests/PaperTodo.CodexMeterChecks/`。
+
+## D-044 Codex 额度以来源年龄和协议协商结果定义可信度
+
+**Status:** Accepted
+
+额度 RPC 优先使用当前 CLI 接受的无参数 `account/rateLimits/read`，只在明确的协议参数错误时尝试对象参数。Runtime 用单飞刷新和有界退避限制子进程数量；实时结果、30 分钟内官方缓存与 15 分钟内 session 观察可以补齐缺失窗口，但 UI 必须显示实际来源，混合结果以最旧观察时间说明年龄。过期缓存不得变成 0% 或伪装成实时额度。
+
+app-server stdio 的 JSON Lines 必须使用无 BOM UTF-8。`.NET Encoding.UTF8` 不能直接作为重定向 stdin 编码，因为首写的 3 字节 BOM 会让当前 Codex CLI 无法完成 initialize；启动配置和测试共同锁定 `UTF8Encoding(false)`。
+
+发布脚本的真实启动检查使用隔离便携目录与 `--package-smoke-test`，该模式拥有独立单实例标识并在健康初始化后自行退出，因此不会把用户正在运行的 PaperNook 当成测试进程，也不会通过 `--exit` 关闭用户实例。证据：`src/CodexMeter/CodexRateLimitReader.cs`、`src/CodexMeter/CodexRefreshPolicy.cs`、`App.xaml.cs`、`tools/Publish-PaperNook.ps1` 与 Codex Meter checks。
+
+## D-045 清单计划台作为原任务投影，AI 排程采用本地确认事务
+
+**Status:** Accepted
+
+**Context:** 用户明确选择在桌面便签基础上增加清单、日期视图与 AI 日程。直接建立第二套任务存储会让原纸片、日期视图和 AI 结果形成不同的完成状态；直接让 AI 写入时间又缺少用户确认和并发保护。
+
+**Decision:** 增加可选 `PlannerWindow` 和持久化的置顶查询配置，但原 `PaperData.Items` 仍拥有任务。分类只通过不可变 Planning 的 `ListId` 引用 Todo 清单；查询目标消失时回退到原纸片，不搬运或复制任务。普通纸片仍显示自己拥有的原任务，跨清单的分类投影由计划台和置顶视图展示。
+
+外部 AI 经 MCP 提交带当前版本摘要的日程草稿，不提供远程直接应用工具。用户在本地预览确认时通过统一命令层重新校验版本、固定状态、日期与冲突，一次同步提交所有受影响纸片；失败完整回滚。保留本次运行内上次排程的恢复值，撤销拒绝覆盖较新的 Planning 编辑。模型接入不复用 Codex 额度模块的认证令牌。
+
+**Why:** 保留已验证的纸片存储、备份与 undo 边界，同时获得跨纸片管理能力；AI 建议和真正业务提交分开，避免旧草稿覆盖用户的新编辑。
+
+**Evidence:** `src/TaskPlanning.cs`、`src/PaperCommandService.Planner.cs`、`src/AppController.Planner.cs`、`src/PlannerWindow.cs`、`src/McpCommandService.cs`、`tests/PaperTodo.PlannerChecks/`。

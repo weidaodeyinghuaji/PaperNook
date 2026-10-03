@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 using PaperTodo.Plugin;
 
@@ -26,6 +27,16 @@ public sealed partial class PaperWindow
     private bool _pluginCapsuleDockedCustomViewAttempted;
     private double _pluginCapsuleRegularCustomViewWidth = double.NaN;
     private double _pluginCapsuleDockedCustomViewWidth = double.NaN;
+    private double? _codexCapsuleTransitionFrom;
+    private bool _codexCapsuleLowQuotaCrossed;
+
+    internal void RefreshPluginMotionPreference()
+    {
+        if (NormalizeBodyProviderId(_paper.BodyProviderId) != PaperBodyProviderIds.CodexMeter)
+            return;
+        RefreshCapsuleLabel(invalidatePreview: false);
+        InvokeBodySession(session => session.OnThemeChanged(CurrentPaperBodyTheme()));
+    }
 
     private FrameworkElement BuildPluginCapsuleContentHost(UIElement defaultContent)
     {
@@ -76,8 +87,20 @@ public sealed partial class PaperWindow
 
     private void SetPluginCapsulePresentation(PaperCapsulePresentation? presentation)
     {
+        var previousRing = _pluginCapsulePresentation?.Components
+            .FirstOrDefault(item => item.Kind == PaperCapsuleComponentKind.ProgressRing)?.Value;
         var previousRequestedWidth = PluginCapsuleRequestedContentWidth();
         var normalized = NormalizePluginCapsulePresentation(presentation);
+        var nextRing = normalized?.Components
+            .FirstOrDefault(item => item.Kind == PaperCapsuleComponentKind.ProgressRing)?.Value;
+        _codexCapsuleTransitionFrom =
+            NormalizeBodyProviderId(_paper.BodyProviderId) == PaperBodyProviderIds.CodexMeter &&
+            CanAnimateCodexCapsule() && previousRing.HasValue && nextRing.HasValue &&
+            Math.Abs(previousRing.Value - nextRing.Value) > 0.0001
+                ? previousRing
+                : null;
+        _codexCapsuleLowQuotaCrossed = _codexCapsuleTransitionFrom is { } oldValue &&
+            nextRing is { } newValue && oldValue > 0.2 && newValue <= 0.2;
         _pluginCapsulePresentation = normalized;
         _paper.BodyCapsuleText = normalized == null
             ? string.Empty
@@ -92,6 +115,8 @@ public sealed partial class PaperWindow
             ResetPluginCapsuleCustomViews();
         }
         RefreshCapsuleLabel();
+        _codexCapsuleTransitionFrom = null;
+        _codexCapsuleLowQuotaCrossed = false;
         if (geometryChanged)
         {
             ApplyCurrentCollapsedCapsuleWidth();
@@ -124,6 +149,10 @@ public sealed partial class PaperWindow
         {
             return null;
         }
+
+        // Preserve built-in, in-memory timing stamps without changing the plugin protocol.
+        for (var index = 0; index < components.Length; index++)
+            CodexActivityLatency.Copy(presentation.Components![index], components[index]);
 
         var width = double.IsFinite(presentation.PreferredWidth)
             ? presentation.PreferredWidth <= PaperCapsulePresentation.AutomaticWidth
@@ -261,7 +290,9 @@ public sealed partial class PaperWindow
         PaperCapsulePresentation presentation,
         PaperCapsuleSurfaceKind surface)
     {
-        if (_bodyDescriptor?.Kind != PaperBodyPluginKind.Native ||
+        if (_bodyDescriptor is not { } descriptor ||
+            (descriptor.Kind != PaperBodyPluginKind.Native &&
+             !(descriptor.Kind == PaperBodyPluginKind.BuiltIn && descriptor.NativePluginType != null)) ||
             _paperBodyHost.Current is not IPaperCapsuleViewProvider provider)
         {
             return null;
@@ -380,6 +411,8 @@ public sealed partial class PaperWindow
                         : GridLength.Auto
             });
             var element = BuildPluginCapsuleComponent(component);
+            if (element is CodexInkRing ink)
+                ink.ActivityEventAt = CodexActivityLatency.Timestamp(component);
             if (index > 0)
             {
                 element.Margin = new Thickness(PluginCapsuleComponentGap, 0, 0, 0);
@@ -410,7 +443,23 @@ public sealed partial class PaperWindow
                     TextTrimming = TextTrimming.CharacterEllipsis
                 };
             case PaperCapsuleComponentKind.StatusDot:
-                return new Ellipse
+            {
+                if (NormalizeBodyProviderId(_paper.BodyProviderId) == PaperBodyProviderIds.CodexMeter)
+                {
+                    var size = component.Width > 0 ? component.Width : 18;
+                    return new CodexInkRing
+                    {
+                        Width = size,
+                        Height = size,
+                        ShowQuotaRing = false,
+                        ActivityKind = component.Text,
+                        ForegroundBrush = brush,
+                        MotionAllowed = CanAnimateCodexCapsule,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        HorizontalAlignment = HorizontalAlignment.Center
+                    };
+                }
+                var dot = new Ellipse
                 {
                     Width = PluginCapsuleStatusDotSize,
                     Height = PluginCapsuleStatusDotSize,
@@ -418,12 +467,42 @@ public sealed partial class PaperWindow
                     VerticalAlignment = VerticalAlignment.Center,
                     HorizontalAlignment = HorizontalAlignment.Center
                 };
+                return dot;
+            }
             case PaperCapsuleComponentKind.ProgressRing:
             {
                 var diameter = component.Width > 0
                     ? Math.Min(component.Width, CapsuleBodyHeight)
                     : PluginCapsuleDefaultProgressRingSize;
-                return new CapsuleProgressRing
+                if (NormalizeBodyProviderId(_paper.BodyProviderId) == PaperBodyProviderIds.CodexMeter)
+                {
+                    var inkRing = new CodexInkRing
+                    {
+                        Width = diameter,
+                        Height = diameter,
+                        Value = component.Value,
+                        ActivityKind = component.Text,
+                        ForegroundBrush = brush,
+                        TrackBrush = Theme.Tint(50),
+                        MotionAllowed = CanAnimateCodexCapsule,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        HorizontalAlignment = HorizontalAlignment.Center
+                    };
+                    if (_codexCapsuleTransitionFrom is { } previous)
+                    {
+                        var lowQuotaCrossed = _codexCapsuleLowQuotaCrossed;
+                        var transitionPlayed = false;
+                        inkRing.Loaded += (_, _) =>
+                        {
+                            if (transitionPlayed || !inkRing.IsVisible || !CanAnimateCodexCapsule()) return;
+                            transitionPlayed = true;
+                            inkRing.AnimateFrom(previous);
+                            if (lowQuotaCrossed) inkRing.CueLowQuota();
+                        };
+                    }
+                    return inkRing;
+                }
+                var ring = new CapsuleProgressRing
                 {
                     Width = diameter,
                     Height = diameter,
@@ -433,6 +512,21 @@ public sealed partial class PaperWindow
                     VerticalAlignment = VerticalAlignment.Center,
                     HorizontalAlignment = HorizontalAlignment.Center
                 };
+                if (_codexCapsuleTransitionFrom is { } from)
+                {
+                    var lowQuotaCrossed = _codexCapsuleLowQuotaCrossed;
+                    var transitionPlayed = false;
+                    ring.Loaded += (_, _) =>
+                    {
+                        if (transitionPlayed || !ring.IsVisible || !CanAnimateCodexCapsule()) return;
+                        transitionPlayed = true;
+                        ring.AnimateFrom(from);
+                        if (lowQuotaCrossed)
+                            ring.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.45, 1,
+                                TimeSpan.FromMilliseconds(600)) { FillBehavior = FillBehavior.Stop });
+                    };
+                }
+                return ring;
             }
             case PaperCapsuleComponentKind.ProgressBar:
                 return new CapsuleProgressBar
@@ -474,6 +568,9 @@ public sealed partial class PaperWindow
                 };
         }
     }
+
+    private bool CanAnimateCodexCapsule() =>
+        _controller.State.EnableAnimations && SystemParameters.ClientAreaAnimation;
 
     private double MeasurePluginCapsuleTemplateWidth(
         PaperCapsulePresentation presentation,
@@ -563,9 +660,27 @@ public sealed partial class PaperWindow
 
     private sealed class CapsuleProgressRing : FrameworkElement
     {
-        public double Value { get; init; }
+        public static readonly DependencyProperty ValueProperty = DependencyProperty.Register(
+            nameof(Value), typeof(double), typeof(CapsuleProgressRing),
+            new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
+
+        public double Value
+        {
+            get => (double)GetValue(ValueProperty);
+            set => SetValue(ValueProperty, value);
+        }
         public required Brush ForegroundBrush { get; init; }
         public required Brush TrackBrush { get; init; }
+
+        public void AnimateFrom(double from)
+        {
+            BeginAnimation(ValueProperty, new DoubleAnimation(from, Value,
+                TimeSpan.FromMilliseconds(520))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                FillBehavior = FillBehavior.Stop
+            });
+        }
 
         protected override void OnRender(DrawingContext drawingContext)
         {

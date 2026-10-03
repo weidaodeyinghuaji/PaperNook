@@ -1,0 +1,88 @@
+name: Unsigned beta release
+
+on:
+  push:
+    branches: ["release/beta-*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  beta:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+      - name: Validate immutable beta identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $project = [xml](Get-Content PaperTodo.csproj -Raw)
+          $version = $project.SelectSingleNode('/Project/PropertyGroup/Version').InnerText
+          if ($version -notmatch '^\d+\.\d+\.\d+-beta\.\d+$') { throw 'This workflow may only publish beta versions.' }
+          if ($env:GITHUB_REF_NAME -ne "release/beta-$version") { throw 'Release branch and project version differ.' }
+          $existing = git tag --list "v$version"
+          if ($LASTEXITCODE -ne 0) { throw 'Tag lookup failed.' }
+          if ($existing) { throw 'Existing tags are immutable. Use a new beta version.' }
+          "PAPERNOOK_BETA_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Rebuild LMDB from repository source
+        run: ./native/lmdb/build.ps1 -Configuration Release -ForceRebuild
+      - name: Run release regression checks
+        run: |
+          foreach ($check in @('CrashRecovery','Persistence','Planner','CodexMeter','ReleaseSafety','ProtocolPolicy')) {
+            dotnet run --project "tests/PaperTodo.${check}Checks/PaperTodo.${check}Checks.csproj" -c Release
+            if ($LASTEXITCODE -ne 0) { throw "$check failed." }
+          }
+      - name: Build and smoke-test portable distribution
+        run: ./tools/Publish-PaperNook.ps1 -Version $env:PAPERNOOK_BETA_VERSION -DotnetPath (Get-Command dotnet).Source
+      - name: Build smaller distribution and verify packages
+        run: |
+          $release = Join-Path $env:RUNNER_TEMP 'papernook-beta-release'
+          $small = Join-Path $env:RUNNER_TEMP 'papernook-beta-no-runtime'
+          New-Item -ItemType Directory -Path $release,$small | Out-Null
+          $prefix = "PaperNook-v$env:PAPERNOOK_BETA_VERSION-win-x64"
+          Copy-Item '输出/PaperNook-便携免安装版/PaperNook.exe' "$release/$prefix-self-contained.exe"
+          Copy-Item "输出/$prefix-portable.zip" $release
+          dotnet publish PaperTodo.csproj -c Release -r win-x64 --self-contained false -o $small /p:PublishSingleFile=true /p:PublishReadyToRun=false /p:IncludeNativeLibrariesForSelfExtract=true /p:EnableCompressionInSingleFile=true /p:PublishTrimmed=false /p:EmbedAllSources=false /p:EmbedUntrackedSources=false /p:DebugType=none /p:DebugSymbols=false /p:PaperNookDistribution=no-runtime
+          if ($LASTEXITCODE -ne 0) { throw 'No-runtime publish failed.' }
+          Copy-Item "$small/PaperNook.exe" "$release/$prefix-no-runtime.exe"
+          foreach ($exe in Get-ChildItem $release -Filter '*.exe') {
+            if ($exe.VersionInfo.ProductVersion -ne $env:PAPERNOOK_BETA_VERSION) { throw 'EXE version mismatch.' }
+          }
+          ./.github/scripts/write_release_manifest.ps1 -ReleaseDirectory $release -Repository $env:GITHUB_REPOSITORY -Tag "v$env:PAPERNOOK_BETA_VERSION" -Version $env:PAPERNOOK_BETA_VERSION
+          $manifest = Get-Content "$release/release-manifest.json" -Raw | ConvertFrom-Json
+          foreach ($asset in $manifest.assets) {
+            $file = Get-Item (Join-Path $release $asset.fileName)
+            if ($file.Length -ne $asset.length -or (Get-FileHash $file.FullName -Algorithm SHA256).Hash -ne $asset.sha256) { throw 'Asset integrity mismatch.' }
+          }
+          $lines = Get-ChildItem $release -File | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }
+          $lines | Set-Content "$release/SHA256SUMS.txt" -Encoding utf8NoBOM
+          "PAPERNOOK_RELEASE_DIRECTORY=$release" >> $env:GITHUB_ENV
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - name: Generate bilingual release notes
+        run: |
+          $prefix = "PaperNook-v$env:PAPERNOOK_BETA_VERSION-win-x64"
+          python .github/scripts/release_notes.py --tag "v$env:PAPERNOOK_BETA_VERSION" --repository $env:GITHUB_REPOSITORY --assets "$prefix-portable.zip" "$prefix-self-contained.exe" "$prefix-no-runtime.exe" release-manifest.json SHA256SUMS.txt --output "$env:PAPERNOOK_RELEASE_DIRECTORY/RELEASE_NOTES.md"
+          if ($LASTEXITCODE -ne 0) { throw 'Release notes failed.' }
+      - name: Publish immutable unsigned prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem $env:PAPERNOOK_RELEASE_DIRECTORY -File | Where-Object Name -ne 'RELEASE_NOTES.md' | Select-Object -ExpandProperty FullName
+          gh release create "v$env:PAPERNOOK_BETA_VERSION" @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "纸隅 PaperNook v$env:PAPERNOOK_BETA_VERSION（未签名测试版）" --prerelease --notes-file "$env:PAPERNOOK_RELEASE_DIRECTORY/RELEASE_NOTES.md"
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release creation failed.' }

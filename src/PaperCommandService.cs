@@ -937,7 +937,8 @@ internal sealed partial class PaperCommandService
         string? LinkedPath,
         bool? LinkedPathIsDirectory,
         DateTimeOffset? ReminderAt,
-        bool ReminderTriggered)
+        bool ReminderTriggered,
+        TaskPlanningData? Planning)
     {
         public static PaperItemSnapshot Capture(PaperItem item) =>
             new(
@@ -949,7 +950,8 @@ internal sealed partial class PaperCommandService
                 item.LinkedPath,
                 item.LinkedPathIsDirectory,
                 item.ReminderAt,
-                item.ReminderTriggered);
+                item.ReminderTriggered,
+                item.Planning);
 
         public PaperItem ToItem()
         {
@@ -960,7 +962,8 @@ internal sealed partial class PaperCommandService
                 Done = Done,
                 Order = Order,
                 ReminderAt = ReminderAt,
-                ReminderTriggered = ReminderTriggered
+                ReminderTriggered = ReminderTriggered,
+                Planning = Planning
             };
             copy.RestoreQuickLaunch(
                 LinkedPaperId,
@@ -980,6 +983,7 @@ internal sealed partial class PaperCommandService
                 LinkedPathIsDirectory);
             Item.ReminderAt = ReminderAt;
             Item.ReminderTriggered = ReminderTriggered;
+            Item.Planning = Planning;
         }
     }
 }

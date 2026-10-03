@@ -16,10 +16,10 @@
     <!-- .NET 9+ marks Windows apphost/single-file hosts CET-compatible by default. Disable that
          opt-in for PaperTodo to avoid User Shadow Stack startup failures on affected legacy Windows builds. -->
     <CETCompat>false</CETCompat>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
-    <InformationalVersion>1.0.0</InformationalVersion>
+    <Version>1.2.0-beta.8</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
+    <InformationalVersion>1.2.0-beta.8</InformationalVersion>
     <AssemblyName>PaperNook</AssemblyName>
     <RootNamespace>PaperTodo</RootNamespace>
     <Product>PaperNook</Product>
@@ -37,7 +37,8 @@
     <ApplicationIcon>assets\PaperNook.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <PaperTodoLmdbLibrary>$(MSBuildProjectDirectory)\native\lmdb\bin\win-x64\papertodo_lmdb.dll</PaperTodoLmdbLibrary>
-    <OutputPath>$(MSBuildProjectDirectory)\输出\PaperNook-v$(Version)\</OutputPath>
+    <!-- Keep build intermediates under bin; the publish script owns runnable output in 输出. -->
+    <OutputPath>$(MSBuildProjectDirectory)\bin\app\$(Configuration)\</OutputPath>
     <SatelliteResourceLanguages>en;ja;ko</SatelliteResourceLanguages>
     <DefaultItemExcludes>$(DefaultItemExcludes);对比_StickyMD\**;输出\**;PaperTodo_v*\**;.codex_decompile_debug\**;PaperTodo.Plugin.Abstractions\**;plugin-samples\**;plugins\**\.runtime\**;plugins\data\**;tests\**;tools\**;vendor\**</DefaultItemExcludes>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

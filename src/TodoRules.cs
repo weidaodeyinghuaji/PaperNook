@@ -11,6 +11,7 @@ internal static class TodoRules
         item.Done ||
         item.ReminderAt.HasValue ||
         item.ReminderTriggered ||
+        item.Planning?.HasContent == true ||
         !string.IsNullOrWhiteSpace(item.LinkedPaperId) ||
         !string.IsNullOrWhiteSpace(item.LinkedPath);
 
@@ -18,6 +19,7 @@ internal static class TodoRules
         item.Done ||
         item.ReminderAt.HasValue ||
         item.ReminderTriggered ||
+        item.Planning?.HasContent == true ||
         !string.IsNullOrWhiteSpace(item.LinkedPaperId) ||
         !string.IsNullOrWhiteSpace(item.LinkedPath);
 
@@ -32,7 +34,8 @@ internal static class TodoRules
             Done = item.Done,
             Order = item.Order,
             ReminderAt = item.ReminderAt,
-            ReminderTriggered = item.ReminderTriggered
+            ReminderTriggered = item.ReminderTriggered,
+            Planning = item.Planning
         };
         clone.RestoreQuickLaunch(item.LinkedPaperId, item.LinkedPath, item.LinkedPathIsDirectory);
         return clone;

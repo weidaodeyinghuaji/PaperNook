@@ -396,14 +396,15 @@ public sealed partial class AppController
         IPaperBodyPlugin? nativeFactory = null;
         try
         {
-            if (descriptor.Kind == PaperBodyPluginKind.Native)
+            if (descriptor.Kind == PaperBodyPluginKind.Native ||
+                (descriptor.Kind == PaperBodyPluginKind.BuiltIn && descriptor.NativePluginType != null))
             {
                 var activation = PaperBodyPlugins.CreateNativePlugin(descriptor);
                 nativeFactory = activation.Plugin;
                 if (activation.Plugin is not IPaperPluginRuntimeProvider provider)
                 {
                     throw new InvalidOperationException(
-                        $"Native plugin '{descriptor.Id}' declares runtime but does not implement IPaperPluginRuntimeProvider.");
+                        $"Native body provider '{descriptor.Id}' declares runtime but does not implement IPaperPluginRuntimeProvider.");
                 }
 
                 runtime = provider.CreatePluginRuntime(new PaperPluginRuntimeContext
@@ -435,11 +436,7 @@ public sealed partial class AppController
                 runtime = webRuntime;
                 await webRuntime.StartAsync();
             }
-            else
-            {
-                throw new InvalidOperationException(
-                    "Built-in body providers cannot declare plugin runtime.");
-            }
+            else throw new InvalidOperationException("Body provider has no usable Runtime factory.");
 
             if (!lifetime.IsActive)
             {

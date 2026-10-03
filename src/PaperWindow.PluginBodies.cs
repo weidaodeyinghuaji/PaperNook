@@ -212,7 +212,8 @@ public sealed partial class PaperWindow
         _bodyDescriptor = descriptor;
         try
         {
-            if (descriptor.Kind == PaperBodyPluginKind.Native)
+            if (descriptor.Kind == PaperBodyPluginKind.Native ||
+                (descriptor.Kind == PaperBodyPluginKind.BuiltIn && descriptor.NativePluginType != null))
             {
                 var stored = ReadPluginState(descriptor.Id);
                 var activation =
@@ -1158,7 +1159,10 @@ public sealed partial class PaperWindow
             AppTypography.ScaleFactor *
                 (BodySupports(PaperBodyCapabilities.TextZoom)
                     ? CurrentTextZoom()
-                    : 1.0));
+                    : 1.0))
+        {
+            AnimationsEnabled = _controller.State.EnableAnimations
+        };
     }
 
     private static string BrushHex(Brush brush, string fallback)

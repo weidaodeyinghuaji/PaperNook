@@ -319,6 +319,7 @@ public sealed partial class AppController : IDisposable
             }
             RefreshMcpRuntime();
             await SchedulePluginStartupPapersAsync(initialVisibilityCommand);
+            RestorePlannerPinnedViews(initialVisibilityCommand);
             return;
         }
 
@@ -343,6 +344,7 @@ public sealed partial class AppController : IDisposable
         }
         RefreshMcpRuntime();
         await SchedulePluginStartupPapersAsync(initialVisibilityCommand);
+        RestorePlannerPinnedViews(initialVisibilityCommand);
     }
 
     private async Task RestorePaperSurfacesAsync(IReadOnlyList<PaperData> papersToRestore)
@@ -1214,6 +1216,9 @@ public sealed partial class AppController : IDisposable
                 break;
             case StartupCommandKind.NewNote:
                 CreatePaper(PaperTypes.Note, show: true);
+                break;
+            case StartupCommandKind.Planner:
+                OpenPlanner();
                 break;
             case StartupCommandKind.Exit:
                 Exit();
@@ -2919,7 +2924,7 @@ public sealed partial class AppController : IDisposable
         _ = TrySaveNow(sync);
     }
 
-    private bool TrySaveNow(bool sync)
+    private bool TrySaveNow(bool sync, bool notifyFailure = true)
     {
         long? attemptedVersion = null;
         try
@@ -2972,7 +2977,8 @@ public sealed partial class AppController : IDisposable
         }
         catch (Exception ex)
         {
-            HandleSaveFailure(ex, attemptedVersion);
+            if (notifyFailure) HandleSaveFailure(ex, attemptedVersion);
+            else ArmSaveRetryIfNeeded(attemptedVersion);
             return false;
         }
     }
@@ -3570,16 +3576,7 @@ public sealed partial class AppController : IDisposable
 
     public void Exit()
     {
-        if (IsExiting)
-        {
-            return;
-        }
-
-        CommitSettingsExternalMarkdownEditor(saveImmediately: false);
-        foreach (var window in _windows.Values.ToList())
-        {
-            window.CommitPendingEditsForSave();
-        }
+        if (!TryPrepareNormalExit()) return;
 
         _lifecycleState = AppLifecycleState.Exiting;
         _saveTimer.Stop();
@@ -3587,18 +3584,6 @@ public sealed partial class AppController : IDisposable
         StopFullscreenAvoidanceRuntime(restoreTopmost: false);
         _displayMetricsRefreshTimer.Stop();
         StopTodoReminderTimer();
-
-        if (!TrySaveNow(sync: true))
-        {
-            TryExitCleanup(() =>
-            {
-                MessageBox.Show(
-                    Strings.Get("ExitSaveFailureMessage"),
-                    Strings.Get("SaveFailureTitle"),
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
-            });
-        }
 
         DisposeRuntimeResources();
         try { _pluginStartupHealthStore.MarkCleanExit(); } catch { }

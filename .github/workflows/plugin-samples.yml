@@ -9,8 +9,11 @@ on:
       - "tests/PaperTodo.ProtocolPolicyChecks/**"
       - "tests/PaperTodo.PluginApiChecks/**"
       - "tests/PaperTodo.CodexCliBridgeChecks/**"
+      - "tests/PaperTodo.CodexMeterChecks/**"
       - "PaperTodo.csproj"
       - "src/AppController.Plugin*.cs"
+      - "src/AppController.CodexMeter.cs"
+      - "src/CodexMeter/**"
       - "src/AppController.Shortcuts.cs"
       - "src/GlobalHotkeys.cs"
       - "src/PaperPluginRuntime*.cs"
@@ -30,8 +33,11 @@ on:
       - "tests/PaperTodo.ProtocolPolicyChecks/**"
       - "tests/PaperTodo.PluginApiChecks/**"
       - "tests/PaperTodo.CodexCliBridgeChecks/**"
+      - "tests/PaperTodo.CodexMeterChecks/**"
       - "PaperTodo.csproj"
       - "src/AppController.Plugin*.cs"
+      - "src/AppController.CodexMeter.cs"
+      - "src/CodexMeter/**"
       - "src/AppController.Shortcuts.cs"
       - "src/GlobalHotkeys.cs"
       - "src/PaperPluginRuntime*.cs"
@@ -75,6 +81,10 @@ jobs:
       - name: Run Codex CLI Bridge prompt checks
         shell: pwsh
         run: dotnet run --project ./tests/PaperTodo.CodexCliBridgeChecks/PaperTodo.CodexCliBridgeChecks.csproj -c Release
+
+      - name: Run Codex Meter checks
+        shell: pwsh
+        run: dotnet run --project ./tests/PaperTodo.CodexMeterChecks/PaperTodo.CodexMeterChecks.csproj -c Release
 
       - name: Validate plugin manifests
         shell: pwsh

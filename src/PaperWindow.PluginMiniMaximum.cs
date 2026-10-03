@@ -117,13 +117,14 @@ public sealed partial class PaperWindow
         }
 
         var providerId = NormalizeBodyProviderId(_paper.BodyProviderId);
-        if (_bodyDescriptor is { Kind: not PaperBodyPluginKind.BuiltIn } current &&
+        if (_bodyDescriptor is { } current &&
+            (current.Kind != PaperBodyPluginKind.BuiltIn || current.NativePluginType != null) &&
             string.Equals(current.Id, providerId, StringComparison.Ordinal))
         {
             return current;
         }
         return _controller.PaperBodyPlugins.TryGet(providerId, out var descriptor) &&
-               descriptor.Kind != PaperBodyPluginKind.BuiltIn
+               (descriptor.Kind != PaperBodyPluginKind.BuiltIn || descriptor.NativePluginType != null)
             ? descriptor
             : null;
     }

@@ -411,6 +411,7 @@ public sealed class AppState
 {
     [JsonRequired]
     public List<PaperData> Papers { get; set; } = new();
+    public List<PlannerPinnedView> PlannerPinnedViews { get; set; } = new();
     [JsonPropertyOrder(-100)]
     public string UiLanguage { get; set; } = UiLanguages.Default;
     public string Theme { get; set; } = "system";
@@ -505,6 +506,7 @@ public sealed class AppState
     public bool McpEnabled { get; set; }
     public bool McpAllowBlankWrites { get; set; }
     public bool McpAllowFullWrites { get; set; }
+    public bool McpAllowScheduleProposals { get; set; }
     public bool McpAllowDeletes { get; set; }
     public bool ExperimentalCapsuleMagnetism { get; set; }
     public bool ExperimentalCapsuleMagnetScreenEdges { get; set; } = true;
@@ -559,6 +561,12 @@ public sealed class PaperData
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Type { get; set; } = PaperTypes.Todo;
     public string Title { get; set; } = "";
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PlannerFolder { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool PlannerInbox { get; set; }
 
     public double X { get; set; } = 120;
     public double Y { get; set; } = 120;
@@ -625,6 +633,9 @@ public sealed class PaperItem
     public string Text { get; set; } = "";
     public bool Done { get; set; }
     public int Order { get; set; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public TaskPlanningData? Planning { get; set; }
 
     [JsonInclude]
     [JsonPropertyName("linkedNoteId")]
