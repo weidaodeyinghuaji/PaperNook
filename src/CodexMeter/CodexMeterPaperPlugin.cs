@@ -231,7 +231,7 @@ internal sealed class CodexMeterPluginRuntime : IPaperPluginRuntime
                 Message = ex.GetBaseException().Message
             };
             if (_latestActivity == null || !IsFreshActivity(_latestActivity.Timestamp))
-                fallback = fallback with { ActivityKind = "unknown", ActivityText = ActivityText("unknown") };
+                fallback = fallback with { ActivityEventAt = null, ActivityKind = "unknown", ActivityText = ActivityText("unknown") };
             _snapshot = fallback;
             foreach (var paper in _context.Papers.List()) Publish(paper.PaperId, fallback);
         }
